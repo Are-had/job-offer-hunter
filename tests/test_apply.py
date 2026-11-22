@@ -1192,6 +1192,7 @@ def test_a_gender_list_is_the_civility_but_never_a_contract_type():
     assert field_kind(F("Genre de contrat")) is None and field_kind(F("Gender")) == "civility"
     assert pick_option(["", "Madame", "Monsieur", "Ne se prononce pas"], "civility", "M.") == 2
     assert pick_option(["", "Femme", "Homme"], "civility", "M.") == 2
+    assert pick_option(["", "Monsieur*"], "civility", "M.") == 1 and pick_option(["", "Madame*"], "civility", "M.") is None  # Chronopost
 
 
 def test_signed_in_the_application_the_offer_opens_is_kept_and_its_sections_opened(tmp_path, window):
@@ -1324,3 +1325,318 @@ def test_a_menu_apply_link_back_to_the_job_list_is_never_pressed(tmp_path, windo
     window.open("up1", (tmp_path / "jobs" / "analyst.html").as_uri(), _job())
     st = _wait(window, "up1")
     assert st["state"] == "filled" and window.pages["up1"].url.endswith("form.html"), (st, window.pages["up1"].url)
+
+
+def test_a_place_search_gets_its_suggestion_chosen(tmp_path):
+    """Lever (20 Nov 2026, 6 companies): 'Current location' is a search that suggests places on a key typed; without one
+    chosen the field counts as empty. The city typed, then its suggestion clicked."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import drive
+    (tmp_path / "offer.html").write_text("""<html><body><h1>Apply</h1><form onsubmit="return false;">
+<label for=fn>Full name</label><input id=fn required><label for=em>Email</label><input id=em type=email required>
+<label for=loc>Current location ✱</label><input id=loc name=location required onkeyup="document.querySelector('.dropdown-results').innerHTML =
+this.value.length > 2 ? '<div>Paris, TX, USA</div><div>Paris, Île-de-France, FRA</div>'.replace('<div>Paris, TX', '<div>Lyon') : ''">
+<input type=hidden id=chosen><div class=dropdown-results onclick="document.getElementById('chosen').value = event.target.textContent"></div>
+<label for=cv>Resume</label><input id=cv type=file><button type=submit>Submit application</button></form></body></html>""", encoding="utf-8")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.goto((tmp_path / "offer.html").as_uri())
+        page, st = drive(page, _job(values={**form_values(AP), "city": "Paris"}), accounts_path=tmp_path / "accounts.json")
+        chosen = page.input_value("#chosen")
+        br.close()
+    assert st["state"] == "filled" and chosen == "Paris, Île-de-France, FRA", (st, chosen)
+
+
+def test_workable_headline_and_a_start_date_typed_into_a_masked_field(tmp_path):
+    """Workable (fifty-five, 20 Nov 2026): '* Headline' is the current position; '* When will you be available to start
+    the role ?' asks a date (MM/DD/YYYY) in a masked field that drops text set at once: available now, today's date, typed
+    key by key."""
+    import datetime
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import drive
+    assert field_kind(F("* Headline", name="headline")) == "current_position"
+    (tmp_path / "offer.html").write_text("""<html><body><h1>Apply</h1><form onsubmit="return false;">
+<label for=fn>First name</label><input id=fn required><label for=em>Email</label><input id=em type=email required>
+<label for=hl>* Headline</label><input id=hl name=headline required>
+<label for=st>* When will you be available to start the role ?</label><input id=st placeholder="MM/DD/YYYY" required
+oninput="if (!this.dataset.k) this.value = ''" onkeydown="this.dataset.k = 1">
+<label for=cv>Resume</label><input id=cv type=file><button type=submit>Submit application</button></form></body></html>""", encoding="utf-8")
+    ap = {**AP, "current_position": "Machine Learning Engineer", "availability": "immediately"}
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.goto((tmp_path / "offer.html").as_uri())
+        page, st = drive(page, _job(values=form_values(ap)), accounts_path=tmp_path / "accounts.json")
+        got = [page.input_value("#hl"), page.input_value("#st")]
+        br.close()
+    assert got == ["Machine Learning Engineer", datetime.date.today().strftime("%m/%d/%Y")], (st, got)
+
+
+def test_a_consent_asked_with_radios_and_a_your_mail_field(tmp_path):
+    """STMicroelectronics (20 Nov 2026): the consent is two radios 'Oui, je consens' / 'Non'; Ingeniance: the email field is
+    named 'your-mail' only. When allowed, 'Oui, je consens'; never a newsletter's 'Oui'."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import drive
+    assert field_kind(F("", name="your-mail")) == "email" and field_kind(F("Mailing list")) is None
+    (tmp_path / "offer.html").write_text("""<html><body><h1>Candidature</h1><form onsubmit="return false;">
+<label for=fn>Prénom</label><input id=fn required><label for=ln>Nom</label><input id=ln required>
+<input name=your-mail id=ym required>
+<fieldset><legend>Consentement au traitement de vos données personnelles *</legend>
+<label><input type=radio name=c value=y>Oui, je consens</label><label><input type=radio name=c value=n>Non</label></fieldset>
+<fieldset><legend>Recevoir notre newsletter</legend>
+<label><input type=radio name=nl value=y>Oui</label><label><input type=radio name=nl value=n>Non</label></fieldset>
+<label for=cv>CV</label><input id=cv type=file><button type=submit>Envoyer</button></form></body></html>""", encoding="utf-8")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.goto((tmp_path / "offer.html").as_uri())
+        page, st = drive(page, _job(allow_terms=True), accounts_path=tmp_path / "accounts.json")
+        got = page.evaluate("""() => [document.getElementById('ym').value, (document.querySelector('[name=c]:checked') || {}).value || null,
+                                      (document.querySelector('[name=nl]:checked') || {}).value || null]""")
+        br.close()
+    assert got == [AP["email"], "y", None], (st, got)
+
+
+def test_employee_of_the_company_and_located_in_the_user_s_country():
+    """Dataiku, Bouygues on Greenhouse / Phenom (20 Nov 2026): 'Are you currently an employee at Dataiku?', 'Are you a
+    candidate from the Bouygues group?' -> No (no employer in the settings); 'Are you currently located in France, United
+    Kingdom...?' -> Yes only because it names the user's country."""
+    from jobfinder.apply import pick_option
+    v = form_values({**AP, "city": "Paris", "country": "France"})
+    assert v["employee"] == "no" and form_values({**AP, "current_employer": "Acme"})["employee"] == ""
+    assert field_kind(F("Are you currently an employee at Dataiku?*")) == "employee"
+    assert field_kind(F("Are you a candidate from the Bouygues group ?*")) == "employee"
+    assert field_kind(F("Employee ID")) is None and field_kind(F("Nom de l'employeur actuel")) is None
+    assert field_kind(F("Are you currently located in France, United Kingdom, Germany?*")) == "relocation"
+    assert pick_option(["", "Yes", "No"], "employee", "no") == 2
+
+
+def test_a_cv_step_is_passed_then_the_application_is_filled(tmp_path, window):
+    """Mitsubishi Electric (Talentsoft, 20 Nov 2026): the application starts with 'Enregistrer mon CV' ('Votre CV :', 'Nom
+    de la pièce jointe', 'Ajouter', 'Continuer'). The CV attached, 'Ajouter' then 'Continuer' are pressed, and the next step
+    is filled. 'Nom de la pièce jointe' is no last name; the final 'Postuler' is never pressed."""
+    cv = tmp_path / "cv.pdf"
+    cv.write_bytes(b"%PDF-1.4 cv")
+    assert field_kind(F("Nom de la pièce jointe :")) is None
+    url = _pages(tmp_path, offer="""<html><body><h1>Enregistrer mon CV</h1><form onsubmit="return false;">
+<label for=cv>Votre CV :</label><input id=cv type=file><label for=pj>Nom de la pièce jointe :</label><input id=pj>
+<input type=submit value=Ajouter onclick="document.title = 'added'"><input type=submit value=Annuler>
+<input type=submit value=Continuer onclick="if (document.title === 'added') location.href = 'step2.html'"></form></body></html>""",
+                 step2="""<html><body><h1>Ma candidature</h1><form onsubmit="location.href='sent.html'; return false;">
+<label for=fn>Prénom</label><input id=fn><label for=ln>Nom</label><input id=ln>
+<label for=t>Téléphone</label><input id=t><label for=v>Ville</label><input id=v>
+<input type=submit value=Postuler></form></body></html>""")
+    window.open("cs1", url, _job(cv_path=str(cv)))
+    st = _wait(window, "cs1")
+    assert st["state"] == "filled" and "phone" in st["filled"], (st, st.get("steps"))
+    assert "CV step: 'Ajouter'" in st["steps"] and "CV step: 'Continuer'" in st["steps"], st["steps"]
+    assert window.pages["cs1"].url.endswith("step2.html")
+
+
+def test_a_known_email_without_a_password_in_the_app_gets_a_reset(tmp_path, window):
+    """iCIMS (Expleo, Soitec, 20 Nov 2026): after the email, 'Saisissez votre mot de passe' - the website knows the email
+    (iCIMS shares the candidate's login), the app holds no password and there is no 'create an account' link. Its
+    'Réinitialiser votre mot de passe' asks the website for a link that sets the app's password."""
+    from jobfinder.apply import load_accounts, site_of
+    url = _pages(tmp_path, offer="""<html><body><h1>Saisissez votre mot de passe</h1><form onsubmit="return false;">
+<label for=e>E-mail</label><input id=e type=email value="jean.dupont@example.org"><label for=p>Mot de passe*</label>
+<input id=p type=password><a href="lost.html">Réinitialiser votre mot de passe</a><button type=submit>Se connecter</button>
+</form></body></html>""", lost="""<html><body><h1>Réinitialiser votre mot de passe</h1><form onsubmit="location.href='asked.html';
+return false;"><label for=m>E-mail</label><input id=m type=email><button type=submit>Envoyer</button></form></body></html>""",
+                 asked="<html><body><h1>Un e-mail vous a été envoyé</h1></body></html>")
+    window.open("rk1", url, _job())
+    st = _wait(window, "rk1")
+    assert st["state"] == "needs_link" and window.pages["rk1"].url.endswith("asked.html"), st
+    assert load_accounts(tmp_path / "accounts.json")[site_of(url)]["state"] == "waiting_link"
+
+
+def test_an_apply_link_without_text_is_known_by_its_address():
+    """Lever (Raidium, Scality, 20 Nov 2026): the offer's 'Apply for this job' link shows no text in the page read; its
+    address ends with /apply. A text-less link elsewhere stays unread."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import apply_rank, scan_page
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.set_content("""<html><body><h1>Marketing Associate Intern</h1>
+<a href="https://jobs.lever.co/raidium/fc5a93b6/apply" style="display:inline-block;width:160px;height:40px"><svg width=10 height=10></svg></a>
+<a href="https://jobs.lever.co/raidium" style="display:inline-block;width:40px;height:40px"><svg width=10 height=10></svg></a></body></html>""")
+        buttons = [b for _, sc in scan_page(page) for b in sc["buttons"]]
+        br.close()
+    assert [b["text"] for b in buttons] == ["Apply"] and apply_rank(buttons[0]) is not None, buttons
+
+
+def test_a_rate_limit_page_is_said_blocked():
+    """Orosound (20 Nov 2026): 'HTTP 429 Ralentissez - Cette requête a été bloquée... (Rate-limit)' was 'no form found'."""
+    from jobfinder.apply import _BLOCKED
+    assert _BLOCKED.search("HTTP 429 Ralentissez Cette requête a été bloquée par une sécurité activée sur l'hébergement")
+    assert _BLOCKED.search("429 Too Many Requests") and not _BLOCKED.search("Nous recrutons 429 ingénieurs")
+
+
+def test_a_text_captcha_is_the_user_s(tmp_path, window):
+    """SFR (20 Nov 2026): its account form ends with 'Merci de recopier le texte ci-dessus' (a captcha as an image of letters):
+    the app pressed 'Valider l'inscription' for nothing. It is the user's, like any captcha."""
+    url = _pages(tmp_path, offer="""<html><body><h1>Créer mon espace candidat</h1><form onsubmit="location.href='made.html'; return false;">
+<label for=e>Saisissez votre email :</label><input id=e type=email><label for=p>Saisissez votre mot de passe :</label>
+<input id=p type=password><label for=p2>Confirmer le mot de passe* :</label><input id=p2 type=password>
+<label for=n>Nom* :</label><input id=n><label for=fn>Prénom* :</label><input id=fn>
+<img alt="" style="width:120px;height:40px;display:block"><input name="captcha[input]" placeholder="Merci de recopier le texte ci-dessus.">
+<button type=submit>Valider l'inscription</button></form></body></html>""")
+    window.open("tc1", url, _job(accounts_only=True, allow_terms=True))
+    st = _wait(window, "tc1")
+    assert st["state"] == "needs_user" and "captcha" in st["message"] and not window.pages["tc1"].url.endswith("made.html"), st
+
+
+def test_a_button_that_sends_the_application_is_never_clicked_whoever_chose_it(tmp_path):
+    """CNRS (20 Nov 2026): an AI reading took the application page for an offer and named its 'Envoyer ma candidature'; the
+    app pressed it (the website refused: its files were empty). The click itself now refuses such a button, and an AI's or a
+    remembered choice passes the same rules as the app's own."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import _click, _FINAL_SEND, apply_rank, scan_page
+    for t in ("Envoyer ma candidature", "Submit application", "Valider ma candidature", "Finaliser votre candidature"):
+        assert _FINAL_SEND.search(t), t
+    for t in ("Postuler", "Je postule à cette offre", "Apply now", "Commencer ma candidature", "Continuer", "Créer mon compte"):
+        assert not _FINAL_SEND.search(t), t
+    (tmp_path / "form.html").write_text("""<html><body><form onsubmit="location.href='sent.html'; return false;">
+<label for=cv>Votre CV *</label><input id=cv type=file><button type=button onclick="location.href='sent.html'">Envoyer ma candidature</button>
+</form></body></html>""", encoding="utf-8")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.goto((tmp_path / "form.html").as_uri())
+        b = next(x for _, sc in scan_page(page) for x in sc["buttons"] if "Envoyer" in x["text"])
+        page = _click(page.main_frame, b, page)
+        page.wait_for_timeout(500)
+        url = page.url
+        br.close()
+    assert url.endswith("form.html"), url
+    assert apply_rank(b) is None or _FINAL_SEND.search(b["text"])
+
+
+def test_a_page_holding_the_user_s_details_never_gets_an_apply_button_pressed(tmp_path):
+    """Safety (20 Nov 2026): a page whose fields already hold the user's details is an application form whatever a reading
+    says; its 'Postuler' (a plain button sending it by script) is never pressed."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import drive
+    (tmp_path / "offer.html").write_text("""<html><body><h1>Offre</h1><label for=fn>Prénom</label><input id=fn value="Jean">
+<label for=ln>Nom</label><input id=ln value="Dupont"><label for=em>E-mail</label><input id=em value="jean.dupont@example.org">
+<button type=button onclick="location.href='sent.html'">Postuler</button></body></html>""", encoding="utf-8")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.goto((tmp_path / "offer.html").as_uri())
+        page, st = drive(page, _job(), accounts_path=tmp_path / "accounts.json")
+        url = page.url
+        br.close()
+    assert "sent.html" not in url and st["state"] in ("filled", "nothing"), (st, url)
+
+
+def test_a_short_consent_label_is_read_with_its_heading(tmp_path):
+    """SII (20 Nov 2026): a required box labelled 'Validation' under the heading 'Consentement et validation'."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import drive
+    (tmp_path / "offer.html").write_text("""<html><body><h1>Candidature</h1><form onsubmit="return false;">
+<label for=fn>Prénom</label><input id=fn><label for=ln>Nom</label><input id=ln><label for=em>E-mail</label><input id=em type=email>
+<fieldset><legend>Consentement et validation</legend><label><input type=checkbox id=v required> Validation</label></fieldset>
+<fieldset><legend>Newsletter</legend><label><input type=checkbox id=n> Oui</label></fieldset>
+<label for=cv>CV</label><input id=cv type=file><button type=submit>Envoyer</button></form></body></html>""", encoding="utf-8")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.goto((tmp_path / "offer.html").as_uri())
+        page, st = drive(page, _job(allow_terms=True), accounts_path=tmp_path / "accounts.json")
+        got = page.evaluate("() => [document.getElementById('v').checked, document.getElementById('n').checked]")
+        br.close()
+    assert got == [True, False], (st, got)
+
+
+def test_an_application_that_starts_by_verifying_the_email_asks_its_code(tmp_path, window):
+    """Roche (Phenom, 22 Nov 2026): 'To begin your application, you must first verify your email address' - Email and
+    'Get OTP'. The email typed, 'Get OTP' pressed, the code asked to the user; a dry run stops before (nothing sent)."""
+    url = _pages(tmp_path, offer="""<html><body><h2>You are applying for - Software Engineer</h2><p>To begin your application,
+you must first verify your email address.</p><label for=e>Email</label><input id=e type=email>
+<button onclick="location.href='otp.html'">Get OTP</button><button>Next</button>
+<input type=file style="display:none"></body></html>""", otp="""<html><body><p>Enter the code sent to your email</p>
+<label for=c>Verification code</label><input id=c><button>Verify</button></body></html>""")
+    window.open("ot1", url, _job())
+    st = _wait(window, "ot1")
+    assert st["state"] == "needs_code" and window.pages["ot1"].url.endswith("otp.html"), st
+    window.open("ot2", url, _job(dry_run=True))
+    st2 = _wait(window, "ot2")
+    assert st2["state"] == "dry_run" and not window.pages["ot2"].url.endswith("otp.html"), st2
+
+
+def test_fields_inside_web_components_are_read_and_filled(tmp_path):
+    """ADP (Stellantis, 22 Nov 2026): the sign-in form is drawn inside web components (open shadow roots); the page read saw
+    no field and no button."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import fill_frame, scan_page
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.set_content("""<html><body><h1>Welcome</h1><x-form></x-form><script>
+customElements.define('x-form', class extends HTMLElement { constructor() { super(); const r = this.attachShadow({mode: 'open'});
+r.innerHTML = '<label for=fn>First name</label><input id=fn><label for=em>Email Address</label><input id=em type=email>' +
+              '<button>Continue</button>'; } });</script></body></html>""")
+        scans = scan_page(page)
+        fields = [f for _, sc in scans for f in sc["fields"]]
+        buttons = [b["text"] for _, sc in scans for b in sc["buttons"]]
+        done = fill_frame(page.main_frame, form_values(AP), "", scans[0][1])
+        got = page.evaluate("() => document.querySelector('x-form').shadowRoot.getElementById('fn').value")
+        br.close()
+    assert [field_kind(f) for f in fields] == ["first_name", "email"] and buttons == ["Continue"], (fields, buttons)
+    assert "first_name" in done and got == AP["first_name"], (done, got)
+
+
+def test_a_checkbox_drawn_by_a_web_component_is_ticked_when_allowed(tmp_path):
+    """ADP (Stellantis, 22 Nov 2026): 'I've read and accept the Employer Privacy Policy' is an 'sdf-checkbox' element that
+    only says role=checkbox: unseen, never ticked."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import fill_account, scan_page
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.set_content("""<html><body><x-box role=checkbox aria-checked=false tabindex=0 style="display:inline-block;width:200px;height:20px"
+onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked') === 'true' ? 'false' : 'true')">I've read and accept
+the Employer Privacy Policy</x-box></body></html>""")
+        sc = scan_page(page)[0][1]
+        boxes = [f for f in sc["fields"] if f["type"] == "checkbox"]
+        r = fill_account(page.main_frame, {"fields": boxes}, {"email": "", "password": ""}, True)
+        got = page.get_attribute("x-box", "aria-checked")
+        br.close()
+    assert len(boxes) == 1 and "terms" in r["done"] and got == "true", (boxes, r, got)
+
+
+PHONE_PICKER = """<html><body><x-phone></x-phone><script>
+customElements.define('x-select', class extends HTMLElement { constructor() { super(); const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<div class=combo><div role=button class="trigger-button" id=t style="display:inline-block;width:40px;height:20px">US</div>' +
+    '<div id=pane style="display:none"><div role=option>United States +1</div><div role=option>France +33</div></div></div>';
+  r.getElementById('t').onclick = () => { r.getElementById('pane').style.display = 'block'; };
+  for (const o of r.querySelectorAll('[role=option]')) o.onclick = () => { r.getElementById('t').textContent = o.textContent.includes('France') ? 'FR' : 'US'; r.getElementById('pane').style.display = 'none'; };
+} });
+customElements.define('x-phone', class extends HTMLElement { constructor() { super(); const r = this.attachShadow({mode: 'open'});
+  r.innerHTML = '<div class="sdf-input-container"><x-select></x-select><label for=ph>Phone Number</label><input id=ph type=tel></div>'; } });
+</script></body></html>"""
+
+
+def test_the_phone_s_country_is_set_to_france(tmp_path):
+    """The user lives in France (22 Nov 2026). ADP (Stellantis): the phone field has a country picker saying 'US', drawn by a
+    component inside another one; the number was typed under 'US'. A plain list beside the phone gets 'France (+33)'."""
+    from playwright.sync_api import sync_playwright
+    from jobfinder.apply import fill_frame, scan_page
+    vals = form_values({**AP, "phone": "06 00 00 00 00", "country": "France"})
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        page = br.new_page()
+        page.set_content(PHONE_PICKER)
+        done = fill_frame(page.main_frame, vals, "", scan_page(page)[0][1])
+        trig = page.evaluate("() => document.querySelector('x-phone').shadowRoot.querySelector('x-select').shadowRoot"
+                             ".getElementById('t').textContent")
+        page.set_content("""<html><body><div><select id=cc><option>États-Unis (+1)</option><option>France (+33)</option></select>
+<label for=ph>Téléphone</label><input id=ph type=tel></div></body></html>""")
+        fill_frame(page.main_frame, vals, "", scan_page(page)[0][1])
+        cc = page.evaluate("() => document.getElementById('cc').value")
+        br.close()
+    assert "phone" in done and trig == "FR", (done, trig)
+    assert cc == "France (+33)", cc

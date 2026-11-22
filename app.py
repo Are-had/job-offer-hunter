@@ -532,13 +532,16 @@ def _rows():
                             type=CONTRACT_LABEL.get(kind) or OFFER_TYPES.get(kind, kind).split(" (")[0] if kind else "not stated",
                             topics=", ".join(r.get("research_topics") or ti.get("topics", [])),
                             relevance=j.relevance_score, match=j.match_score, link=web_link(offer_link(j.url, j.title, j.apply_url)),
-                            status=j.status))
+                            # the app's own page for the offer, which opens and fills its application at once
+                            fill=f"/results?fill={j.uid}", status=j.status))
     return pd.DataFrame(out)
 
 
 def page_results():
     shell("Results", "Every offer found, with its exact link, its publication date and why it was kept.", "Offers", wide=True)
     df = _rows()
+    fill = st.query_params.get("fill")
+    top = st.container()  # the row's 'fill' link: that offer's card, its application opened and filled at once
     if df.empty:
         st.html('<div class="jf-empty"><div class="jf-big">No offers yet</div>Follow the three steps on the Search page.</div>')
         return
@@ -564,16 +567,27 @@ def page_results():
                                       "type": st.column_config.TextColumn("contract", help="'not stated': the offer does not say it"),
                                       "relevance": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
                                       "match": st.column_config.ProgressColumn("CV match", min_value=0, max_value=100, format="%d"),
-                                      "link": st.column_config.LinkColumn("offer", display_text="open")})
-    st.download_button("Export CSV", v.drop(columns=["uid"]).to_csv(index=False), "offers.csv", icon=":material/download:")
+                                      "link": st.column_config.LinkColumn(
+                                          "description", display_text="read", help="The offer on its website: read it"),
+                                      "fill": st.column_config.LinkColumn(
+                                          "apply", display_text="fill", help="Opens the application in the app's window, "
+                                          "signed in (or your account made), everything filled and your CV attached: you check "
+                                          "and submit")})
+    st.download_button("Export CSV", v.drop(columns=["uid", "fill"]).to_csv(index=False), "offers.csv", icon=":material/download:")
     rows = sel.selection.rows if sel and sel.selection else []
     if rows:
+        if fill:
+            del st.query_params["fill"]  # a row chosen in the table replaces the offer of the link
         job_detail(v.iloc[rows[0]].uid)
+    elif fill and fill in set(df.uid):
+        with top:
+            job_detail(fill, autostart=True)
+            st.divider()
     else:
-        st.caption("Select a row to open the offer.")
+        st.caption("Select a row to open the offer, or use its 'fill' link.")
 
 
-def job_detail(uid):
+def job_detail(uid, autostart=False):
     with SessionLocal() as s:
         j = s.query(Job).filter_by(uid=uid).first()
         ti, r = (j.extra or {}).get("title_info") or {}, j.relevance_json or {}
@@ -592,7 +606,7 @@ def job_detail(uid):
                 l1.link_button("Open the offer", link, icon=":material/open_in_new:", width="stretch", type="primary")
             if web_link(j.apply_url) and j.apply_url not in (j.url, link) and "jboffer=" not in j.apply_url:
                 l2.link_button("Apply page", j.apply_url, icon=":material/send:", width="stretch")
-            _apply_controls(s, j, link)
+            _apply_controls(s, j, link, autostart)
             a, b = st.columns(2)
             seen = (j.extra or {}).get("first_seen")
             when = (f"{j.pub_date:%d %b %Y}" if j.pub_date else "not stated by the website" +
@@ -741,7 +755,17 @@ def _apply_status(uid):
                 st.code(text, language=None, wrap_lines=True)
 
 
-def _apply_controls(s, j, link):
+def _start_fill(s, j, target):
+    """The offer's application opened in the app's window and filled (the button, or the 'fill' link of its row)."""
+    if not (ap["first_name"] and ap["last_name"] and ap["email"]):
+        st.warning("Add your first name, last name and email first: Search page, step 2, 'Your details'.")
+        return
+    with st.spinner("Preparing the message for this offer…"):
+        st.session_state[f"apply_letter_{j.uid}"] = _apply_letter(s, j)
+    apply_form.WINDOW.open(j.uid, target, _apply_job(j.uid))
+
+
+def _apply_controls(s, j, link, autostart=False):
     """'Open and fill the application': the offer opened in the app's own browser window on this computer, signed in (or
     an account created) when the website asks, its form filled with the user's details and a short message for the
     offer. The user attaches the CV and the letter and submits."""
@@ -755,12 +779,11 @@ def _apply_controls(s, j, link):
                                                "in (or creates your account) when the website asks, and fills in your "
                                                "details and a short message for this offer. You attach your CV and letter "
                                                "and submit yourself.")):
-        if not (ap["first_name"] and ap["last_name"] and ap["email"]):
-            st.warning("Add your first name, last name and email first: Search page, step 2, 'Your details'.")
-        else:
-            with st.spinner("Preparing the message for this offer…"):
-                st.session_state[f"apply_letter_{j.uid}"] = _apply_letter(s, j)
-            apply_form.WINDOW.open(j.uid, target, _apply_job(j.uid))
+        _start_fill(s, j, target)
+    elif autostart and ok and not st.session_state.get(f"autofilled_{j.uid}"):
+        st.session_state[f"autofilled_{j.uid}"] = True  # once: a rerun of the page never opens it again
+        if not apply_form.WINDOW.status.get(j.uid):
+            _start_fill(s, j, target)
     stt = apply_form.WINDOW.status.get(j.uid)
     if stt:
         if x2.button("Continue", key=f"af{j.uid}", icon=":material/play_arrow:", width="stretch",

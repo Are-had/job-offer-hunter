@@ -45,3 +45,16 @@ def test_the_window_gets_the_offer_s_title_letter_and_the_user_s_answers():
     assert '"position"' in fns["_apply_job"] and '"letter_path": _apply_letter_pdf(uid)' in fns["_apply_job"]
     for key in ("salary_expectation", "availability", "english_level", "current_position"):
         assert f'ap["{key}"]' in src, key
+
+
+def test_each_offer_row_has_a_read_link_and_a_fill_link():
+    """The user's request (22 Nov 2026): on each position, one button to read the offer on its website, one to open its
+    application in the app's window with everything filled. The 'fill' link is the app's own page for the offer
+    (/results?fill=<uid>): its card shows and the application opens and fills once, a rerun never opens it again."""
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fns = {n.name: ast.get_source_segment(src, n) for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert 'fill=f"/results?fill={j.uid}"' in fns["_rows"]
+    assert '"description", display_text="read"' in fns["page_results"] and '"apply", display_text="fill"' in fns["page_results"]
+    assert 'st.query_params.get("fill")' in fns["page_results"] and "autostart=True" in fns["page_results"]
+    assert "autofilled_" in fns["_apply_controls"] and "_start_fill(s, j, target)" in fns["_apply_controls"]

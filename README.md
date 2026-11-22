@@ -99,10 +99,14 @@ flowchart LR
 
 ## Apply in one click
 
+Each row of the Results table has two links: **read** opens the offer on its website, **fill** opens its application in
+the app's window with everything filled (the same as the offer's **Open and fill the application** button).
+
 On an offer, **Open and fill the application** opens its application form in a browser window of the app, on your
 computer, and fills in what you saved once on the Search page: civility, name, email, phone, address, LinkedIn, website,
-education, right to work, nationality, how you heard about the offer. The form's cover-letter box gets a **short message
-written for that offer (5 lines at most)**; the full letter is the file you attach.
+education, right to work, nationality, how you heard about the offer, and the questions many forms ask: salary
+expectation, start date, English level, current position, 'based in Paris?', 'are you an employee of this company?'. The
+form's cover-letter box gets a **short message written for that offer (5 lines at most)**.
 
 - **Gets to the form by itself**: the offer's *Postuler / Apply* button (in a frame or behind a menu too), Workday's
   *Apply Manually* and *Sign in with email*, sign-ins that ask the email first, pages still being built by their scripts.
@@ -115,9 +119,18 @@ written for that offer (5 lines at most)**; the full letter is the file you atta
   understands is read once, by Claude with an Anthropic key or by the free models of your other keys, structure only.
 - **Says it plainly** when an offer is applied to by email (with the address), starts with your CV, is gone, or when the
   website turns the window away.
-- **Your CV** goes into a form's CV field (the one matched best to the offer); the letter file stays yours.
-- **Never** submits the application, solves a captcha or ticks a newsletter box; a website's terms box only if you
-  allow it. You check and submit.
+- **Your CV** goes into a form's CV field (the one matched best to the offer), and the offer's cover letter (its PDF,
+  written on the offer's card) into a letter file field.
+- **Lists and searches**: drop-downs that open a list (Greenhouse), place searches (Lever's location), date fields and
+  masked fields are answered like the others; questions the offer asks only you (years of experience, a specific skill)
+  are left to you.
+- **Your phone in France**: a country picker beside the phone field is set to France (+33); forms drawn by web components
+  (ADP) are read and filled too.
+- **Never** submits the application, presses a *one-click apply*, solves a captcha or ticks a newsletter box; a
+  website's terms and a form's required consent box only if you allow it. You check and submit.
+- Tested on 20 Nov 2026 on one live offer of each of the 367 websites with offers in the lists: 247 forms reached and
+  filled, 184 of them with nothing left but the CV and the offer's own questions; the others need an account you make
+  yourself (Workday), a captcha, an email, or are blocked by the website.
 - It needs a screen: it works when the app runs on your own computer, not on a server or in Docker.
 
 ## How it works

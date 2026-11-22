@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import claude_forms
-from .config import DATA_DIR
+from .config import DATA_DIR, LOG
 
 PROFILE_DIR = DATA_DIR / "apply_browser"
 
@@ -76,6 +76,8 @@ def form_values(ap: dict) -> dict:
             ap.get("english_level") or "", ap.get("english_level") or ""),  # a language list: English, at that level
         "current_position": ap.get("current_position", ""),
         "phone_code": "+33" if re.search(r"france", ap.get("country") or "France", re.I) else "",
+        # 'are you an employee of <the company> / a candidate from its group?': no employer in the settings, so no
+        "employee": "" if (ap.get("current_employer") or "").strip() else "no",
         "relocation": "yes" if (ap.get("city") or (m[2].strip() if m else "")) else "",  # only where it names the city
     }
 
@@ -93,8 +95,12 @@ _RULES = [
     ("availability", r"disponibilit|start date|date de (?:debut|demarrage|prise de poste)|when (?:can|could) you start|"
                      r"available to start|earliest start|notice period|preavis"),
     ("english", r"anglais|english"),
-    ("relocation", r"relocat|demenag|based in|base(?:e)? a |vivez.vous a|habitez.vous a|resid(?:e|ez) a"),
-    ("current_position", r"current (?:position|job title|job|role|title|occupation)|poste actuel|fonction actuelle|"
+    ("employee", r"(?:currently |already |presently )?(?:an? )?(?:employee|staff member) (?:at|of|with)\b|"
+                 r"candidate from the .{1,40} group|internal candidate|candidat(?:e)? interne|(?:etes|es).vous (?:deja |actuellement )?"
+                 r"(?:salarie|collaborat|employe)"),
+    ("relocation", r"relocat|demenag|based in|currently (?:located|living|residing) in|located in|base(?:e)? a |vivez.vous (?:a|en)|"
+                   r"habitez.vous (?:a|en)|resid(?:e|ez) (?:a|en)"),
+    ("current_position", r"current (?:position|job title|job|role|title|occupation)|poste actuel|fonction actuelle|^\W*headline\b|"
                          r"emploi actuel|dernier poste|last (?:position|job title)|(?:votre |your )?titre actuel"),
     ("phone_code", r"indicatif|country code|code pays|code du pays|dial(?:ling)? code|phone prefix|prefixe"),
     ("position", r"poste (?:recherche|souhaite|vise|convoite)|intitule du poste|position (?:applied|sought|desired)|"
@@ -109,7 +115,7 @@ _RULES = [
     ("work_authorization", r"authori[sz]|right to work|legally (?:able|eligible|allowed)|eligible to work|"
                            r"autorise.{0,25}travailler|autorisation de travail|permis de travail|titre de sejour"),
     ("nationality", r"nationalit|citizenship"),
-    ("email", r"e.?mail|courriel|adresse electronique"),
+    ("email", r"e.?mail|courriel|adresse electronique|\bmail\b|your.mail"),
     ("linkedin", r"linked.?in"),
     ("website", r"website|site (?:web|internet|personnel)|portfolio|github|gitlab|personal (?:site|page|url)"),
     # both names in one field ('Nom et prénom'), before the rules for each name
@@ -132,10 +138,11 @@ _RULES = [
     ("degree", r"degree|diplome|niveau d.etudes|niveau de formation|education level|highest (?:level|qualification)"),
 ]
 _RULES = [(k, re.compile(rx)) for k, rx in _RULES]
-_QUESTIONS = 12  # the first rules are questions: checked before _OTHER
+_QUESTIONS = 13  # the first rules are questions: checked before _OTHER
 # a field about someone else, or a company: never filled with the user's details
 _OTHER = re.compile(r"entreprise|company|societe|employ(?:er|eur|e|ee)\b|recruteur|\breferent|manager|\breference|parrain|"
                     r"\br[eé]f[eé]r[eé]|\breferred|\breferral|coopt|"
+                    r"piece jointe|pieces jointes|attachment|nom du fichier|file ?name|nom du document|"
                     r"\bref\b|code promo|captcha|search|recherch|code pays|country code|indicatif|password|mot de passe|"
                     r"utilisateur|user.?name|identifiant|\blogin\b")
 _PLACEHOLDER = re.compile(r"^$|^-+|select|choisi|selectionn|choose|veuillez|please|^\.\.\.")
@@ -198,8 +205,8 @@ def pick_option(options: list[str], kind: str, value: str) -> int | None:
     if kind == "civility":
         rx = re.compile(r"^(m\.?|mr\.?|monsieur|mister|homme|masculin|male|man)$") if want in ("m.", "m", "monsieur", "mr") else \
             re.compile(r"^(mme\.?|mrs\.?|ms\.?|madame|mlle|femme|feminin|female|woman)$")
-        return next((i for i, o in enumerate(opts) if rx.match(o)), None)
-    if kind in ("work_authorization", "sponsorship", "relocation"):
+        return next((i for i, o in enumerate(opts) if rx.match(re.sub(r"[\s*:]+$", "", o))), None)  # 'Monsieur*'
+    if kind in ("work_authorization", "sponsorship", "relocation", "employee"):
         rx = _YES if want == "yes" else _NO
         return next((i for i, o in enumerate(options) if rx.match(o)), None)
     if kind == "english":  # 'fluent in English?' yes / no, or a level list (C2, 'Bilingue', 'Courant', 'Native')
@@ -246,20 +253,27 @@ def pick_option(options: list[str], kind: str, value: str) -> int | None:
 # --------------------------------------------------------------------------- the page side (Playwright)
 _COLLECT = r"""() => {
   const fields = [], buttons = []; let n = 0, m = 0;
+  // the page and the open shadow roots of its web components (ADP: the sign-in form drawn inside 'sdf-' elements)
+  const roots = [document];
+  for (let k = 0; k < roots.length && k < 400; k++)
+    for (const el of roots[k].querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
+  const all = sel => roots.flatMap(r => [...r.querySelectorAll(sel)]);
+  const labelFor = el => { const r = el.getRootNode(); const l = el.id && r.querySelector ? r.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
+                           return l; };
   // the marks of an earlier reading go first: a field it marked and this one skips (now hidden, read-only) would share
   // its number with another field, and the fill or click meant for one would find two
-  for (const el of document.querySelectorAll('[data-jf]')) el.removeAttribute('data-jf');
-  for (const el of document.querySelectorAll('[data-jb]')) el.removeAttribute('data-jb');
-  for (const el of document.querySelectorAll('[data-jff]')) el.removeAttribute('data-jff');
+  for (const el of all('[data-jf]')) el.removeAttribute('data-jf');
+  for (const el of all('[data-jb]')) el.removeAttribute('data-jb');
+  for (const el of all('[data-jff]')) el.removeAttribute('data-jff');
   const textOf = el => (el ? (el.innerText || el.textContent || '') : '').replace(/\s+/g, ' ').trim();
   const shown = el => { const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
                         return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
   // file fields (hidden ones too: a styled 'upload' button hides its input): which one takes the CV
   const files = []; let q = 0;
-  for (const el of document.querySelectorAll('input[type=file]')) {
+  for (const el of all('input[type=file]')) {
     if (el.disabled) continue;
     let label = '';
-    if (el.id) { const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (l) label = textOf(l); }
+    if (el.id) { const l = labelFor(el); if (l) label = textOf(l); }
     if (!label && el.closest('label')) label = textOf(el.closest('label'));
     let near = ''; let p = el.parentElement;
     for (let i = 0; i < 4 && p && !near; i++, p = p.parentElement) { const t = textOf(p); if (t && t.length < 160) near = t; }
@@ -268,13 +282,13 @@ _COLLECT = r"""() => {
     files.push({id, label, near, name: el.name || '', elid: el.id || '', aria: el.getAttribute('aria-label') || '',
                 accept: el.accept || '', has: !!(el.files && el.files.length)});
   }
-  for (const el of document.querySelectorAll('input, textarea, select')) {
+  for (const el of all('input, textarea, select')) {
     const type = (el.getAttribute('type') || el.tagName).toLowerCase();
     if (['hidden','submit','button','image','reset','file','search'].includes(type)) continue;
     if (!shown(el) && type !== 'radio' && type !== 'checkbox') continue;
     if (el.disabled || el.readOnly) continue;
     let label = '';
-    if (el.id) { const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (l) label = textOf(l); }
+    if (el.id) { const l = labelFor(el); if (l) label = textOf(l); }
     if (!label && el.closest('label')) label = textOf(el.closest('label'));
     const lb = el.getAttribute('aria-labelledby');
     if (!label && lb) label = lb.split(/\s+/).map(i => textOf(document.getElementById(i))).join(' ');
@@ -303,13 +317,32 @@ _COLLECT = r"""() => {
                  chosenIndex: el.tagName === 'SELECT' ? el.selectedIndex : -1,
                  options: el.tagName === 'SELECT' ? [...el.options].map(o => o.text.trim()) : []});
   }
+  // a checkbox drawn by a web component (ADP's 'sdf-checkbox'): its role says it; one that wraps a real box is that box
+  for (const el of all('[role=checkbox]')) {
+    if (el.tagName === 'INPUT' || el.querySelector('input[type=checkbox]') ||
+        (el.shadowRoot && el.shadowRoot.querySelector('input[type=checkbox]')) || !shown(el)) continue;
+    let label = (el.getAttribute('aria-label') || textOf(el) || '').slice(0, 300);
+    const lb = el.getAttribute('aria-labelledby');
+    if (!label && lb) label = lb.split(/\s+/).map(i => textOf(document.getElementById(i))).join(' ');
+    const id = 'jf' + (n++);
+    el.setAttribute('data-jf', id);
+    fields.push({id, tag: el.tagName.toLowerCase(), type: 'checkbox', name: el.getAttribute('name') || '', elid: el.id || '',
+                 placeholder: '', aria: '', autocomplete: '', label, near: '', group: '', role: 'checkbox', value: '',
+                 checked: el.getAttribute('aria-checked') === 'true',
+                 required: el.getAttribute('aria-required') === 'true' || el.hasAttribute('required'),
+                 chosen: '', chosenIndex: -1, options: []});
+  }
   // the fields a form would send: a button that submits a form holding them is never an 'apply' button to press
   const formFields = f => [...f.querySelectorAll('input, textarea, select')].filter(e => {
     const t = (e.getAttribute('type') || e.tagName).toLowerCase();
     return !['hidden','submit','button','image','reset','search'].includes(t) && (t === 'file' || shown(e)); }).length;
-  for (const el of document.querySelectorAll('button, input[type=submit], input[type=button], a[href], [role=button], [role=link]')) {
+  for (const el of all('button, input[type=submit], input[type=button], a[href], [role=button], [role=link]')) {
     if (!shown(el)) continue;
-    const text = (textOf(el) || el.value || el.getAttribute('aria-label') || el.title || '').replace(/\s+/g, ' ').trim();
+    let text = (textOf(el) || el.value || el.getAttribute('aria-label') || el.title || '').replace(/\s+/g, ' ').trim();
+    if (!text && el.tagName === 'A') {  // Lever: its 'Apply' link shows no text; its address says it
+      try { if (/\/(apply|postuler|candidater?|candidature|application)\/?$/i.test(new URL(el.href, location.href).pathname)) text = 'Apply'; }
+      catch (e) {}
+    }
     if (!text || text.length > 80) continue;
     const id = 'jb' + (m++);
     el.setAttribute('data-jb', id);
@@ -335,7 +368,7 @@ _COLLECT = r"""() => {
   }
   const captcha = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"], ' +
                                            '.g-recaptcha, .h-captcha, .cf-turnstile, [data-sitekey]');
-  return {fields, buttons, files, captcha, title: document.title || '', uploads: document.querySelectorAll('input[type=file]').length,
+  return {fields, buttons, files, captcha, title: document.title || '', uploads: all('input[type=file]').length,
           heading: textOf(document.querySelector('h1')).slice(0, 160),
           mails: (() => { const t = document.body ? document.body.innerText || '' : '', out = [];
                           for (const m of t.matchAll(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g)) {
@@ -371,6 +404,14 @@ _NOT_APPLY = re.compile(r"linkedin|indeed|google|facebook|apple|xing|viadeo|\bse
                         r"\bsend (?:my |your |the |an? )?(?:application|candidature|cv|resume)|valider|confirm|termin|"
                         r"finish|alert|partag|share|sauvegard|\bsave\b|enregistr|d[ée]connex|d[ée]connecter|log ?out|"
                         r"sign ?out|cookie|\bretour\b|\bback to\b|return to|en (?:un|1) clic|one[- ]click|1[- ]click|quick apply|candidature express", re.I)
+
+
+def _sends_form(b: dict) -> bool:
+    """A button that would send a form (a submit of a form holding fields or a file, or saying it sends the application):
+    never pressed to open an application, whoever chose it (the rules, an AI reading, a remembered button)."""
+    t = b.get("text") or ""
+    return bool(_FINAL_SEND.search(t) or (b.get("submits") and (b.get("formFile") or (b.get("formFields", 0) >= 2 and not (
+        b.get("wholePage") and (_APPLY.match(t) or (len(t.split()) <= 9 and _APPLY_PHRASE.search(t))))))))
 
 
 def apply_rank(b: dict) -> int | None:
@@ -502,7 +543,8 @@ _GONE = re.compile(r"\b404\b|page (?:not found|introuvable|non trouv[ée]e)|n'ex
 _BLOCKED = re.compile(r"acc[eè]s (?:temporairement )?(?:restreint|refus[ée]|bloqu[ée]|interdit)|access (?:temporarily )?"
                       r"(?:restricted|denied|blocked|forbidden)|unusual traffic|trafic inhabituel|request (?:was |has been )?"
                       r"blocked|you have been blocked|vous avez [ée]t[ée] bloqu|attention required|\b403\b\W{0,3}forbidden|"
-                      r"^\s*forbidden\b|error 403|erreur 403|acc[eè]s refus[ée]", re.I)
+                      r"^\s*forbidden\b|error 403|erreur 403|acc[eè]s refus[ée]|\bhttp 429\b|too many requests|"
+                      r"\bralentissez\b|rate.?limit|requ[eê]te a [ée]t[ée] bloqu[ée]e", re.I)
 # a robot check served in a frame of its own (DataDome, Cloudflare, Radware, hCaptcha, reCAPTCHA's challenge)
 _CHECK_FRAME = re.compile(r"captcha-delivery\.com|challenges\.cloudflare\.com|perfdrive\.com|hcaptcha\.com/captcha|"
                           r"recaptcha/api2/bframe|recaptcha/enterprise/bframe", re.I)
@@ -511,6 +553,92 @@ _CHECKING = re.compile(r"cloudflare|just a moment|checking (?:your browser|if th
                        r"you(?:'re| are) (?:a )?human|v[ée]rifi\w* que vous [eê]tes|are you a (?:robot|human)|"
                        r"[eê]tes.vous (?:un )?(?:robot|humain)|testing whether you are a human|what code is in the image|"
                        r"tiger ?protect|v[ée]rification de s[ée]curit[ée]|security check|ddos protection", re.I)
+
+
+def _type(el, value: str, tag: str = "input"):
+    """A text set in a field; typed key by key when the page drops text set at once (a masked field: Workable's date
+    'MM/DD/YYYY'; a web component's input: ADP's sign-in)."""
+    el.fill(value, timeout=3000)
+    if tag == "input" and value and not el.input_value(timeout=2000):
+        el.click(timeout=3000)
+        el.press_sequentially(value, delay=25, timeout=10000)
+        el.press("Escape")
+
+
+_PICKER = r"""e => {  // the country picker beside a phone field: a list, a button or a combobox saying 'US', '+1', a flag
+  for (const old of document.querySelectorAll('[data-jpc]')) old.removeAttribute('data-jpc');
+  let node = e;
+  for (let up = 0; up < 6 && node; up++) {
+    node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+    if (!node) break;
+    const roots = [node]; if (node.shadowRoot) roots.push(node.shadowRoot);
+    for (let k = 0; k < roots.length && k < 200; k++)  // every component nested under it (ADP: the picker two levels down)
+      for (const d of roots[k].querySelectorAll('*')) if (d.shadowRoot) roots.push(d.shadowRoot);
+    for (const r of roots) for (const c of r.querySelectorAll('select, [role=combobox], [role=button], button, [class*=flag], [class*=country]')) {
+      if (c === e || c.contains(e)) continue;
+      const t = (c.innerText || c.value || c.getAttribute('aria-label') || c.title || '').trim();
+      const cls = String(c.className || '');
+      if (c.tagName === 'SELECT' ? [...c.options].some(o => /\+\s?33|france/i.test(o.text)) :
+          (/^(\+\s?\d{1,3}|[A-Z]{2})\b/.test(t) || /flag|country|dial|iti__/i.test(cls))) {
+        c.setAttribute('data-jpc', '1');
+        return {kind: c.tagName === 'SELECT' ? 'select' : 'click', text: t.slice(0, 20)};
+      }
+    }
+  }
+  return null; }"""
+
+
+def _phone_country(frame, el, number: str, country: str) -> bool:
+    """The phone's country set to the user's (France, +33) where a picker sits beside the field (ADP: 'US'; intl-tel-input:
+    a flag). Its list chosen when it can be; else the number typed in its international form (+33 ...), which such pickers
+    read. -> True when the country is said one way or the other."""
+    if not re.search(r"france|\bfr\b", country or "", re.I):
+        return False
+    try:
+        found = el.evaluate(_PICKER)
+    except Exception:
+        found = None
+    if not found:
+        return False
+    if re.search(r"\+\s?33\b|^FR\b", found.get("text") or ""):
+        return True  # already France
+    pick = frame.locator("[data-jpc]").first
+    try:
+        if found["kind"] == "select":
+            opts = pick.evaluate("s => [...s.options].map(o => o.text)")
+            i = next((k for k, o in enumerate(opts) if re.search(r"\+\s?33\b|^france\b", o.strip(), re.I)), None)
+            if i is not None:
+                pick.select_option(index=i, timeout=3000)
+                return True
+        else:
+            pick.click(timeout=3000)
+            frame.wait_for_timeout(600)
+            search = frame.locator("input[type=search]:visible, [role=searchbox]:visible, [role=dialog] input:visible, "
+                                   "[class*=pane] input:visible, [class*=dropdown] input:visible").first
+            if search.count():
+                try:
+                    search.fill("France", timeout=2000)
+                    frame.wait_for_timeout(500)
+                except Exception:
+                    pass
+            opt = frame.locator("[role=option]:visible, li:visible, [role=menuitem]:visible").filter(
+                has_text=re.compile(r"^\s*(?:🇫🇷\s*)?France\b|\+\s?33\b", re.I)).first
+            if opt.count():
+                opt.click(timeout=3000)
+                return True
+            frame.page.keyboard.press("Escape")
+    except Exception:
+        pass
+    # the picker could not be set: the number in its international form, which it reads
+    digits = re.sub(r"\D", "", number or "")
+    if digits.startswith("0") and len(digits) == 10:
+        try:
+            el.fill("", timeout=2000)
+            _type(el, "+33 " + " ".join([digits[1]] + [digits[k:k + 2] for k in range(2, 10, 2)]))
+            return True
+        except Exception:
+            pass
+    return False
 
 
 def fill_frame(frame, values: dict, letter: str, scan=None, plan_roles=None) -> list[str]:
@@ -528,7 +656,7 @@ def fill_frame(frame, values: dict, letter: str, scan=None, plan_roles=None) -> 
             continue
         value = letter if kind == "cover_letter" else values.get(kind, "")
         asked = _fold(f"{_text(f)} {f.get('group') or ''}")  # a radio's question is its group's text
-        if kind == "relocation" and not (values.get("city") and _fold(values["city"]) in asked):
+        if kind == "relocation" and not any(v and _fold(v) in asked for v in (values.get("city"), values.get("country"))):
             value = ""  # 'based in Paris or ready to relocate?': yes; any other move is the user's to answer
         if kind == "language" and (f["tag"] != "select" or re.search(
                 r"(?:^|\D)[2-9](?:\D|$)|second|correspondan|communication|preferred|maternelle|native", asked)):
@@ -538,6 +666,16 @@ def fill_frame(frame, values: dict, letter: str, scan=None, plan_roles=None) -> 
         if kind == "availability" and re.search(r"deplacement|travel|week.?end|horaire|shift|astreinte|interview|entretien",
                                                 asked):
             value = ""  # available to travel, for shifts, for an interview: never the start date
+        if kind == "availability" and value and (f["type"] == "date" or re.search(
+                r"[mj]{2}/[dj]{2}/(?:yyyy|aaaa)|[dj]{2}/[mj]{2}/(?:yyyy|aaaa)|yyyy-mm-dd", _text(f), re.I)):
+            # a start date asked as a date (Workable: 'MM/DD/YYYY'): available now, so today, in the field's own format
+            if not re.match(r"imm", _fold(value)):
+                value = ""
+            else:
+                import datetime as _dt
+                d, ph = _dt.date.today(), _text(f).lower()
+                value = d.isoformat() if f["type"] == "date" or "yyyy-mm-dd" in ph else \
+                    d.strftime("%m/%d/%Y") if re.search(r"mm/dd", ph) else d.strftime("%d/%m/%Y")
         if kind == "salary" and value and f["tag"] != "select" and f["type"] not in ("number", "radio"):
             value = f"{int(value):,} € brut annuel".replace(",", " ")
         if not value:
@@ -545,7 +683,8 @@ def fill_frame(frame, values: dict, letter: str, scan=None, plan_roles=None) -> 
         el = frame.locator(f'[data-jf="{f["id"]}"]')
         try:
             if f["type"] == "radio":  # yes / no questions and civility: the radio whose label says the answer
-                if kind in ("work_authorization", "sponsorship", "civility", "relocation", "english", "availability", "salary") \
+                if kind in ("work_authorization", "sponsorship", "civility", "relocation", "english", "availability", "salary",
+                            "employee") \
                         and not f["checked"] and pick_option(["", f.get("label") or ""], kind, value) == 1:
                     el.check(force=True, timeout=3000)
                     done.append(kind)
@@ -572,7 +711,11 @@ def fill_frame(frame, values: dict, letter: str, scan=None, plan_roles=None) -> 
                           typed=value if kind in ("country", "city", "nationality", "school") else ""):
                     done.append(kind)
                 continue
-            el.fill(value, timeout=3000)
+            _type(el, value, f["tag"])
+            if kind == "phone":  # the user lives in France: the phone's country picker beside it on France (+33)
+                _phone_country(frame, el, value, values.get("country") or "France")
+            if kind == "city":  # a place search (Lever's 'Current location'): its suggestion for the city, chosen
+                _suggestion(frame, el, value)
             done.append(kind)
         except Exception:
             continue  # a field the page hides or rebuilds: the others are still filled
@@ -584,10 +727,41 @@ _NOT_CV_FILE = re.compile(r"lettre|cover|motivation|letter|photo|portrait|dipl[o
                           r"additional|compl[ée]mentaire|identit|passport|passeport", re.I)
 
 
-_YES_NO_KINDS = ("work_authorization", "sponsorship", "relocation", "english", "civility")
+_YES_NO_KINDS = ("work_authorization", "sponsorship", "relocation", "english", "civility", "employee")
 _AGREE = re.compile(r"^\W*(?:i |je )?(?:agree|accept|consent|j.accepte|oui|yes|i have read|j.ai lu)", re.I)
 _COMBO_CONSENT = re.compile(r"personal data|resume data|donn[ée]es personnelles|gdpr|rgpd|privacy|confidentialit|consent|"
                             r"data (?:processing|protection|retention)|traitement de (?:mes|vos) donn", re.I)
+
+
+_SUGGESTIONS = ("[role=option]:visible, .dropdown-results > *:visible, .pac-item:visible, "
+                "[class*=suggestion] li:visible, [class*=autocomplete] li:visible, [class*=suggest-item]:visible")
+
+
+def _suggestion(frame, el, value) -> bool:
+    """A place typed in a search box that wants one of its suggestions (Lever, Google Places): the first suggestion that
+    starts with the place, clicked. None shown in 2 s: the typed text stays."""
+    want = _fold(value)
+    try:  # its search starts on a key typed (Lever), not on the text set at once
+        el.press("End")
+        el.press_sequentially(" ", delay=30)
+        el.press("Backspace")
+    except Exception:
+        pass
+    for _ in range(4):
+        frame.wait_for_timeout(500)
+        try:
+            items = frame.locator(_SUGGESTIONS)
+            texts = items.all_inner_texts()[:30]
+        except Exception:
+            return False
+        k = next((i for i, t in enumerate(texts) if _fold(t).strip().startswith(want)), None)
+        if k is not None:
+            try:
+                items.nth(k).click(timeout=3000)
+                return True
+            except Exception:
+                return False
+    return False
 
 
 def _combo_pick(texts, kind, value):
@@ -803,7 +977,9 @@ def _now() -> str:
 # --------------------------------------------------------------------------- what kind of page, which button
 _SIGNUP_TXT = re.compile(r"cr[ée]er (?:un |mon |votre )?compte|(?:me |vous )?cr[ée]e[rz]? (?:un |mon |votre )?(?:compte|espace|"
                          r"profil)|s'inscrire|je m'inscris|inscrivez.vous|\binscription\b|"
-                         r"create (?:an |a |my |your )?(?:new )?account|sign ?up|\bregister\b|nouveau candidat|new (?:user|candidate)",
+                         r"create (?:an |a |my |your )?(?:new )?account|sign ?up|\bregister\b|nouveau candidat|new (?:user|candidate)|"
+                         r"pas encore inscrit|pas encore de compte|pas de compte|not (?:yet )?registered|no account yet|"
+                         r"don.t have an account|new here",
                          re.I)
 _SIGNIN_BTN = re.compile(r"^\s*(?:se connecter|connexion|me connecter|je me connecte|sign ?in|log ?in|login|connect)\s*[→›»>]?\s*$",
                          re.I)
@@ -829,6 +1005,11 @@ _TERMS_LINK = re.compile(r"^\s*(?:lire et accepter|read and accept|accepter|acce
 _TERMS_OK = re.compile(r"^\s*(?:accepter|j'accepte|accept|i accept|i agree|agree|j'ai lu et j'accepte|accept and close)\s*$",
                        re.I)
 # 'create an account using any of these options' (Siemens): the one without a CV, the user's details typed in
+# a link to the account form, by its address (SFR: 'Pas encore inscrit ?' -> /account/register)
+_SIGNUP_HREF = re.compile(r"/(?:account/)?(?:register|signup|sign-up|inscription|creer-?(?:un-?)?compte|create-?account)\b", re.I)
+# a captcha asked as a text to copy (an image of letters): the user's, like any other
+_TEXT_CAPTCHA = re.compile(r"captcha|recopie[rz] (?:le texte|les caract[eè]res|le code)|code (?:de s[ée]curit[ée] )?(?:ci-dessus|affich[ée])|"
+                           r"(?:type|enter) the (?:characters|text|code) (?:you see|shown|above|in the image)", re.I)
 _SELF_FILL = re.compile(r"^\s*(?:self[- ]?complete|fill (?:it )?in manually|enter (?:your )?(?:details|information) manually|"
                         r"manually|saisie manuelle|saisir manuellement|remplir manuellement|manuellement|without (?:a )?(?:cv|"
                         r"resume)|sans cv)\b", re.I)
@@ -942,10 +1123,12 @@ def fill_account(frame, scan: dict, acct: dict, allow_terms: bool, roles=None, r
                 continue
             if f["type"] == "password" or role in ("password", "password_confirm"):
                 if not f["value"]:
-                    _el(frame, f).fill(acct["password"], timeout=3000)
+                    _type(_el(frame, f), acct["password"], f["tag"])
                     done.append("password")
             elif f["type"] == "checkbox":
                 text = f.get("label") or f.get("group") or f.get("near") or ""
+                if f.get("label") and len(f["label"]) < 25 and f.get("group"):  # SII: 'Validation' under 'Consentement et
+                    text = f"{f['label']} {f['group'][:200]}"                    # validation': its heading says what it is
                 required = f.get("required") or re.search(r"\*\s*$|^\W*\*", text.strip())  # Phenom: '* J'accepte...'
                 consent = _TERMS.search(text) or (required and _CONSENT.search(text))
                 if role == "terms" or (consent and not _MARKETING.search(text)):
@@ -957,7 +1140,7 @@ def fill_account(frame, scan: dict, acct: dict, allow_terms: bool, roles=None, r
                             terms_left = True
             elif role in ("username", "email") or field_kind(f) == "email" or _USERNAME.search(_text(f)):
                 if not f["value"]:
-                    _el(frame, f).fill(acct["email"], timeout=3000)
+                    _type(_el(frame, f), acct["email"], f["tag"])
                     done.append("email")
         except Exception:
             continue
@@ -986,10 +1169,21 @@ def settle(page, idle=5000):
         pass
 
 
+# the last line of defence (CNRS, 20 Nov 2026: an AI reading took the application page for an offer and named its 'Envoyer ma
+# candidature'): a button that says it SENDS the application is never clicked, whoever chose it
+_FINAL_SEND = re.compile(r"(?:envoyer|soumettre|valider|finaliser|confirmer|transmettre|d[ée]poser) (?:ma |votre |la |cette )?"
+                         r"candidature|(?:submit|send|complete|finish|confirm) (?:my |your |the |this )?application|"
+                         r"submit (?:and|&) (?:apply|send)|je (?:confirme|valide|finalise) ma candidature|"
+                         r"postuler maintenant et envoyer|bewerbung (?:absenden|senden)", re.I)
+
+
 def _click(frame, b: dict, page):
     """Click a button or link; follow the tab it opens, if any. -> the page now shown. When something covers the button:
     the website's own click layer (Workday) takes a real click at its place; a banner or a scrolling box gets the click
-    sent to the button itself."""
+    sent to the button itself. A button that sends the application is never clicked (_FINAL_SEND)."""
+    if _FINAL_SEND.search(b.get("text") or ""):
+        LOG.warning("refused to click %r: it sends the application", b.get("text"))
+        return page
     ctx = page.context
     before, url0 = list(ctx.pages), page.url
     loc = frame.locator(f'[data-jb="{b["id"]}"]')
@@ -1139,11 +1333,18 @@ def email_first(scan, url: str) -> dict | None:
         return None
     if field_kind(fs[0]) != "email" and not re.search(r"e-?mail|ibm ?id|user ?id|username|identifiant|login", _text(fs[0]), re.I):
         return None  # (the one field is the account's email or user name: IBM's 'IBMid')
+    code_way = pick_button(scan["buttons"], _SEND_CODE)
+    if code_way and field_kind(fs[0]) == "email":  # Roche: 'verify your email address' - Email + 'Get OTP'
+        return code_way
     if not (_LOGIN_PAGE.search(url or "") or _LOGIN_WORDS.search(f"{scan.get('title', '')} {scan.get('heading', '')}")):
         return None
     return pick_button(scan["buttons"], _NEXT_BTN)
 
 
+# a button that sends a code to the email typed (the application starts by verifying it)
+_SEND_CODE = re.compile(r"get (?:an? )?(?:otp|code)|send (?:me )?(?:an? |the )?(?:otp|code|verification)|"
+                        r"(?:envoyer|recevoir|obtenir) (?:le |un |mon )?code|verify (?:my |your )?e-?mail|"
+                        r"v[ée]rifier (?:mon |votre )?(?:e-?mail|adresse)", re.I)
 _CHECK_MAIL = re.compile(r"check your (?:e-?mail|inbox|mailbox)|verify your (?:e-?mail|account|address)|confirm your "
                          r"(?:e-?mail|account|address|registration)|(?:e-?mail|link) (?:has been |was )?sent|activate your account|"
                          r"v[ée]rifi(?:ez|er) votre (?:e-?mail|adresse|compte|bo[iî]te)|confirm(?:ez|er) votre (?:e-?mail|adresse|"
@@ -1214,7 +1415,7 @@ _REFUSED = re.compile(r"(?:mot de passe|password|identifiant|login|e-?mail).{0,6
                       r"pas [ée]t[ée] reconnu|wrong|erron[ée])|(?:incorrect|invalid|wrong).{0,30}(?:password|credentials|"
                       r"login)|impossible de se connecter|identifiants? (?:incorrects?|invalides?)", re.I)
 # a sign-in page's 'forgotten password' link, and the button of the page it opens that sends the reset email
-_LOST_LINK = re.compile(r"mot de passe (?:perdu|oubli[ée])|oubli[ée] (?:de )?(?:votre |mon |le )?mot de passe|forgot(?:ten)? "
+_LOST_LINK = re.compile(r"mot de passe (?:perdu|oubli[ée])|r[ée]initialiser (?:votre |mon |le )?mot de passe|oubli[ée] (?:de )?(?:votre |mon |le )?mot de passe|forgot(?:ten)? "
                         r"(?:your |my )?password|reset (?:your |my )?password|lost (?:your |my )?password|identifiants? "
                         r"(?:perdus?|oubli[ée]s?)", re.I)
 _LOST_SEND = re.compile(r"recevoir|r[ée]initialis|r[ée]cup[ée]rer|retrouver|envoyer|send|reset|recover|valider|submit|"
@@ -1238,6 +1439,34 @@ def _cv_first(page, scans, job, note) -> bool:
         job["_letter_done"] = True  # CNRS: 'Votre CV *' and 'Votre Lettre de Motivation *', files both
     page.wait_for_timeout(4000)
     return True
+
+
+_CV_UPLOAD = re.compile(r"^\s*(?:ajouter|t[ée]l[ée]verser|t[ée]l[ée]charger|importer|upload|charger|joindre|"
+                        r"ajouter (?:mon|le|un) cv|importer (?:mon|le|un) cv|upload (?:my |your )?(?:cv|r[ée]sum[ée]))\s*$", re.I)
+_CV_NEXT = re.compile(r"^\s*(?:continuer|suivant|next|continue|[ée]tape suivante|passer [àa] l.[ée]tape suivante|"
+                      r"next step)\s*[→›»>]?\s*$", re.I)
+_SENDS_FINAL = re.compile(r"postul|envoyer|submit|soumettre|apply|candidature|transmettre|bewerb", re.I)
+
+
+def _cv_step(scans, job):
+    """The application's first step asks only the CV (Talentsoft: 'Enregistrer mon CV' with 'Ajouter' then 'Continuer'):
+    once the CV is attached, its upload button once, then its next-step button (twice at most), so the website reads the CV
+    and shows the rest of the application. Never on a page that asks the user's details, never 'Postuler' / 'Envoyer'.
+    -> (frame, button, what) or None."""
+    if not job.get("_cv_done") or (job.get("dry_run") and not job.get("dry_cv")):
+        return None
+    if any(field_kind(f) in ("first_name", "last_name", "full_name", "email", "phone") for _, sc in scans for f in sc["fields"]
+           if f["type"] != "password"):  # (a job search's 'Localisation' in the header is no detail of the user's)
+        return None
+    for fr, sc in scans:
+        btns = [b for b in sc["buttons"] if not b.get("nav") and b["tag"] != "a" and not _SENDS_FINAL.search(b["text"])]
+        up = None if job.get("_cv_uploaded") else next((b for b in btns if _CV_UPLOAD.match(b["text"])), None)
+        if up:
+            return fr, up, "upload"
+        nx = next((b for b in btns if _CV_NEXT.match(b["text"])), None)
+        if nx and job.get("_cv_next", 0) < 2:
+            return fr, nx, "next"
+    return None
 
 
 def _files_given(job) -> dict:
@@ -1300,7 +1529,8 @@ def _drive(page, job, note, accounts_path, max_steps):
                 note("cookie banner: optional cookies refused")
         scans = _still_scan(page)
         frame, scan = _main(scans)
-        captcha = any(sc["captcha"] for _, sc in scans) or any(_CHECK_FRAME.search(f.url or "") for f in page.frames)
+        captcha = any(sc["captcha"] for _, sc in scans) or any(_CHECK_FRAME.search(f.url or "") for f in page.frames) or \
+            any(_TEXT_CAPTCHA.search(_text(f)) for _, sc in scans for f in sc["fields"])  # SFR: 'recopier le texte ci-dessus'
         lost_form = None
         if job.get("_resetting") and not job.get("dry_run"):  # the 'forgotten password' form opened after a refused sign-in
             for fr, sc in sorted(scans, key=lambda x: not _LOST_LINK.search(f"{x[1]['title']} {x[1].get('heading', '')} "
@@ -1368,6 +1598,19 @@ def _drive(page, job, note, accounts_path, max_steps):
         way = pick_button([b for b in scan["buttons"] if _button_id(b) not in here], _EMAIL_WAY) \
             if kind == "other" or pressed_all else None  # (an offer's own 'Apply' first)
         nxt = email_first(scan, f"{page.url} {getattr(frame, 'url', '')}") if kind == "other" else None  # iCIMS: a frame
+        if nxt and not way and not job.get("dry_run") and own_account_site(page.url) is False:
+            have = account(site, job.get("email", ""), path=accounts_path)
+            join = pick_button(scan["buttons"], _SIGNUP_TXT, prefer_submit=False) or \
+                next((x for x in scan["buttons"] if x["tag"] == "a" and _SIGNUP_HREF.search(x.get("href") or "")), None)
+            if join and (not have or have.get("state") == "creating"):
+                # no account of the app's on this website, which offers to make one (IBM: 'Créer un IBMid'): its sign-up,
+                # never its sign-in with an email it does not know (it would only ask a password or a code for nothing)
+                note("no account on this website yet: opening 'create an account'")
+                clicked("go_to_sign_up", join)
+                job["_to_signup"] = True
+                page = _click(frame, join, page)
+                steps += 1
+                continue
         if way or nxt:
             if job.get("dry_run") and nxt:
                 return page, {"state": "dry_run", "wall": "sign_in", "message": "dry run: a sign-in page asking the email "
@@ -1380,9 +1623,9 @@ def _drive(page, job, note, accounts_path, max_steps):
                 steps += 1
                 continue
             for f in scan["fields"]:
-                if f["type"] not in ("checkbox", "radio") and not (f["value"] or "").strip():
+                if f["type"] not in ("checkbox", "radio") and f["tag"] != "select" and not (f["value"] or "").strip():
                     try:
-                        _el(frame, f).fill(job.get("email", ""), timeout=3000)
+                        _type(_el(frame, f), job.get("email", ""), f["tag"])
                     except Exception:
                         pass
             if fill_account(frame, {"fields": [f for f in scan["fields"] if f["type"] == "checkbox"]}, {"email": "", "password": ""},
@@ -1457,6 +1700,10 @@ def _drive(page, job, note, accounts_path, max_steps):
                                                             "offer_page") else "other"
                 if kind == "email_code" and not [f for f in scan["fields"] if f["type"] not in ("checkbox", "radio")]:
                     kind = "other"  # a reading that sees a code to type on a page without any field: not believed
+                said = f"{scan['title']} {scan.get('heading', '')} {scan.get('body', '')[:1500]} " + \
+                    " ".join(_text(f) for f in scan["fields"])
+                if kind == "email_code" and not re.search(r"\bcode\b|v[ée]rif|\botp\b|one.time|passcode|pin\b", said, re.I):
+                    kind = "other"  # (Roche: an application page read as 'type the emailed code', no code said anywhere)
                 named = {x.key: x.role for x in plan.fields if x.role != "other"}
                 roles.update(named)
                 learning("fields").update({k: v for k, v in named.items() if v in _MEMORABLE})
@@ -1479,6 +1726,12 @@ def _drive(page, job, note, accounts_path, max_steps):
         if plan and plan.button:
             planned = next((b for b in scan["buttons"] if claude_forms.button_key(b) == plan.button), None)
 
+        if kind == "application_form" and job.get("_to_signup") and not job.get("dry_run"):
+            made = account(site, job.get("email", ""), path=accounts_path)
+            if not made or made.get("state") == "creating":
+                # opened from 'create an account' on a website where the app has none yet (SFR, IBM): the account form, its
+                # details asked first, never an application
+                kind = "sign_up"
         if kind == "application_form":
             pw = [f for f in scan["fields"] if f["type"] == "password"]
             acct = account(site, job.get("email", ""), path=accounts_path)
@@ -1513,6 +1766,15 @@ def _drive(page, job, note, accounts_path, max_steps):
                 filled += fill_frame(fr, values, job.get("letter", ""), sc, roles)
             if job.get("allow_terms"):  # its required consent box (data processing, privacy policy): the user allowed it
                 for fr, sc in scans:
+                    radios = [f for f in sc["fields"] if f["type"] == "radio" and _AGREE.match(f.get("label") or "")
+                              and _CONSENT.search(f.get("group") or "") and not _MARKETING.search(f.get("group") or "")]
+                    for f in radios:  # a consent asked as 'Oui, je consens' / 'Non' (STMicroelectronics)
+                        if not any(g["checked"] for g in sc["fields"] if g["type"] == "radio" and g["name"] == f["name"]):
+                            try:
+                                _tick(_el(fr, f))
+                                filled.append("consent")
+                            except Exception:
+                                pass
                     for f in sc["fields"]:
                         if f.get("role") == "combobox" and not (f["value"] or "").strip() and \
                                 _COMBO_CONSENT.search(f"{f.get('label') or ''} {f.get('aria') or ''}") and \
@@ -1537,17 +1799,47 @@ def _drive(page, job, note, accounts_path, max_steps):
             if uploads and _cv_first(page, scans, job, note):
                 continue
             if uploads:
+                step = _cv_step(scans, job)
+                if step:  # the CV step's own buttons: the website reads the CV, then shows the application
+                    fr, b, what = step
+                    if what == "upload":
+                        job["_cv_uploaded"] = True
+                    else:
+                        job["_cv_next"] = job.get("_cv_next", 0) + 1
+                    note(f"CV step: '{b['text'][:30]}'")
+                    seen.clear()  # its own steps: the same page, moving on
+                    page = _click(fr, b, page)
+                    continue
                 return page, (_files_given(job) if job.get("_cv_done") else {"state": "needs_user", "filled": [], "message": _CV_FIRST})
             return page, {"state": "nothing", "filled": [], "message": "The application form is open; it had no empty field "
                           "the app knows. Fill it in the window." + extra}
 
+        if kind == "offer_page" and sum(1 for _, sc in scans for f in sc["fields"] if field_kind(f) in _IDENTITY
+                                        and f["type"] not in ("checkbox", "radio") and (f["value"] or "").strip()) >= 2:
+            # the user's details already in this page's fields: an application form, whatever a reading said; its
+            # 'Postuler' would send it - never pressed
+            return page, {"state": "filled", "filled": [], "message": "The application form is open and filled: check it, "
+                          "attach what is missing, and submit."}
         if kind == "offer_page":
-            pick = next(((frame, b) for b in (saved_apply, planned) if b and _button_id(b) not in here), None) or \
+            # an AI's or a remembered choice passes the same rules as the app's own: never a button that sends a form
+            pick = next(((frame, b) for b in (saved_apply, planned) if b and _button_id(b) not in here
+                         and not _sends_form(b)), None) or \
                 (cands[0] if cands else None)
             if pick is None:
                 if uploads and _cv_first(page, scans, job, note):
                     continue
                 if uploads:
+                    step = _cv_step(scans, job)
+                    if step:  # the CV step's own buttons: the website reads the CV, then shows the application
+                        fr, b, what = step
+                        if what == "upload":
+                            job["_cv_uploaded"] = True
+                        else:
+                            job["_cv_next"] = job.get("_cv_next", 0) + 1
+                        note(f"CV step: '{b['text'][:30]}'")
+                        seen.clear()  # its own steps: the same page, moving on
+                        page = _click(fr, b, page)
+                        continue
                     return page, (_files_given(job) if job.get("_cv_done") else {"state": "needs_user", "message": _CV_FIRST})
                 mail = by_email(scans, (job.get("email", ""), job["values"].get("email", "")))
                 if mail:
@@ -1577,6 +1869,14 @@ def _drive(page, job, note, accounts_path, max_steps):
             if acct:
                 fill_account(frame, scan, acct, job.get("allow_terms", False), roles)
                 b = _sign_in_button(scan, memory, planned, plan)
+                nxt_step = None if b or not job.get("_created") or job.get("_acct_steps", 0) >= 3 else \
+                    pick_button([x for x in scan["buttons"] if x["tag"] != "a"], _CV_NEXT)
+                if nxt_step:  # an account made in steps (IBM: 'Définir le mot de passe' 2/3): its next step, never a sign-in
+                    job["_acct_steps"] = job.get("_acct_steps", 0) + 1
+                    note(f"account form, next step: '{nxt_step['text'][:30]}'")
+                    clicked("account_next", nxt_step)
+                    page = _click(frame, nxt_step, page)
+                    continue
                 if not b:
                     return page, {"state": "needs_user", "message": "Your sign-in details are filled: click the website's "
                                   "sign-in button in the window, then 'Continue'."}
@@ -1589,13 +1889,28 @@ def _drive(page, job, note, accounts_path, max_steps):
             b = _saved_button(scan, memory, "go_to_sign_up") or \
                 (planned if plan and plan.button_role == "go_to_sign_up" else None) or \
                 pick_button(scan["buttons"], _SIGNUP_TXT, prefer_submit=False) or \
+                next((x for x in scan["buttons"] if x["tag"] == "a" and _SIGNUP_HREF.search(x.get("href") or "")), None) or \
                 (pick_button(scan["buttons"], _SELF_FILL, prefer_submit=False)
                  if _SIGNUP_TXT.search(f"{scan.get('heading', '')} {scan.get('body', '')}") else None)
+            asks_email = any(not (f["value"] or "").strip() and f["type"] not in ("password", "checkbox", "radio", "file")
+                             and (field_kind(f) == "email" or _USERNAME.search(_text(f))) for f in scan["fields"])
+            lost = None if b or asks_email or job.get("_lost_asked") or job.get("dry_run") else \
+                pick_button(scan["buttons"], _LOST_LINK, prefer_submit=False)
+            if lost:  # (only when the email is already given: the page asks its password, not who is signing in)
+                # the website knows the email already (iCIMS: 'Saisissez votre mot de passe' for it, no 'create' link) and
+                # the app holds no password there: its reset sets the app's password through the emailed link
+                account(site, job.get("email", ""), create=True, path=accounts_path)
+                job["_lost_asked"] = job["_resetting"] = True
+                note("the website knows this email but the app has no password there: asking it for a new one")
+                clicked("lost_password", lost)
+                page = _click(frame, lost, page)
+                continue
             if not b:
                 return page, {"state": "needs_user", "message": "This website asks you to sign in and the app found no "
                               "'create an account' link: create it in the window, then click 'Continue'."}
             note("no account on this website yet: opening 'create an account'")
             clicked("go_to_sign_up", b)
+            job["_to_signup"] = True
             page = _click(frame, b, page)
             continue
 
@@ -1714,6 +2029,17 @@ def _drive(page, job, note, accounts_path, max_steps):
         if uploads and _cv_first(page, scans, job, note):
             continue
         if uploads:
+            step = _cv_step(scans, job)
+            if step:  # the CV step's own buttons: the website reads the CV, then shows the application
+                fr, b, what = step
+                if what == "upload":
+                    job["_cv_uploaded"] = True
+                else:
+                    job["_cv_next"] = job.get("_cv_next", 0) + 1
+                note(f"CV step: '{b['text'][:30]}'")
+                seen.clear()  # its own steps: the same page, moving on
+                page = _click(fr, b, page)
+                continue
             return page, (_files_given(job) if job.get("_cv_done") else {"state": "needs_user", "message": _CV_FIRST})
         mail = by_email(scans, (job.get("email", ""), job["values"].get("email", "")))
         if mail:
