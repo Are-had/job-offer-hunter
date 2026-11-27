@@ -23,7 +23,7 @@
   <a href="docs/HOW-IT-WORKS.md">Full reference</a>
 </p>
 
-> **Credits.** This project is based on [Job Finder by Zinou](https://github.com/2ineddine/scrape-Job-websites)
+> **Job Offer Hunter** is based on [Job Finder by Zinou](https://github.com/2ineddine/scrape-Job-websites)
 > and updated by Arezki. See [What's new in this version](#whats-new-in-this-version).
 
 ---
@@ -66,7 +66,7 @@ offer back with **evidence**: when it was published, where the job is, why it ma
 ## Quick start
 
 ```bash
-git clone https://github.com/2ineddine/scrape-Job-websites.git && cd scrape-Job-websites
+git clone https://github.com/Are-had/job-offer-hunter.git && cd job-offer-hunter
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
@@ -271,4 +271,3 @@ Please add a test with the fix (`tests/`), and run `python -m pytest -q` before 
 
 [Apache 2.0](LICENSE). Original work by [Zinou](https://github.com/2ineddine/scrape-Job-websites); modified by Arezki
 (see [What's new in this version](#whats-new-in-this-version)).
-"# job-offer-hunter" 
