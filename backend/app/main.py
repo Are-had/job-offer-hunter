@@ -45,4 +45,5 @@ if DIST.is_dir():  # the built React pages; any other path is a page of the sing
         f = (DIST / path).resolve()
         if path and f.is_file() and DIST.resolve() in f.parents:
             return FileResponse(f)
-        return FileResponse(DIST / "index.html")
+        # the page is checked again at every visit: after an update it names the new scripts at once
+        return FileResponse(DIST / "index.html", headers={"Cache-Control": "no-cache"})
