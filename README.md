@@ -271,3 +271,4 @@ Please add a test with the fix (`tests/`), and run `python -m pytest -q` before 
 
 [Apache 2.0](LICENSE). Original work by [Zinou](https://github.com/2ineddine/scrape-Job-websites); modified by Arezki
 (see [What's new in this version](#whats-new-in-this-version)).
+"# job-offer-hunter" 
