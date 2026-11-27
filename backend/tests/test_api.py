@@ -119,8 +119,16 @@ def test_the_built_pages_are_served_with_the_fonts_and_logo(client):
     from backend.app.main import DIST
     assert client.get("/fonts/PPTelegraf-Regular.otf").status_code == 200
     assert client.get("/brand/logo.svg").status_code == 200
+    assert client.get("/brand/logo.svg").headers["content-type"].startswith("image/svg+xml")
     if DIST.is_dir():
         for path in ("/", "/results", "/settings"):  # every page of the single-page app is its index.html
             r = client.get(path)
             assert r.status_code == 200 and '<div id="root">' in r.text
+        # the script must be served as JavaScript: a 'text/plain' script (the Windows registry's type on some computers,
+        # 28 Nov 2026) is refused by the browser and the page stays empty
+        import re
+        page = client.get("/").text
+        js, css = re.search(r'/assets/[^"]+\.js', page).group(0), re.search(r'/assets/[^"]+\.css', page).group(0)
+        assert client.get(js).headers["content-type"].startswith("text/javascript")
+        assert client.get(css).headers["content-type"].startswith("text/css")
         assert client.get("/../api_keys.txt").status_code in (200, 404) and "API_KEY" not in client.get("/../api_keys.txt").text

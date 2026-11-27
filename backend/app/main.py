@@ -4,6 +4,7 @@ Run (from the repository):  python -m uvicorn backend.app.main:app --port 8600  
 The API is documented at /docs. Keep it on 127.0.0.1: there is no login."""
 from __future__ import annotations
 
+import mimetypes
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,6 +17,11 @@ from .routes_search import router as search_router
 from .routes_settings import router as settings_router
 
 DIST = ROOT / "frontend" / "dist"
+# Python takes the files' types from the Windows registry, where '.js' is often 'text/plain': the browser then refuses
+# to run the pages' script and shows an empty page. The types of the files served here are set, whatever the registry says.
+for _type, _ext in (("text/javascript", ".js"), ("text/css", ".css"), ("image/svg+xml", ".svg"), ("font/otf", ".otf"),
+                    ("application/json", ".json"), ("text/html", ".html")):
+    mimetypes.add_type(_type, _ext)
 
 
 @asynccontextmanager

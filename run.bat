@@ -21,6 +21,11 @@ if not exist "frontend\dist\index.html" (
     popd
 )
 
-start "" http://127.0.0.1:8600
+echo.
+echo   Job Offer Hunter: open  http://127.0.0.1:8600  in your browser
+echo   (it opens by itself in a few seconds; close this window to stop the app)
+echo.
+REM the browser, once the server is up; a default browser Windows refuses to open (Avast's...) only leaves the address above
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep 3; try { Start-Process 'http://127.0.0.1:8600' -ErrorAction Stop } catch {}"
 "%ENV%\python.exe" -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8600
 pause
