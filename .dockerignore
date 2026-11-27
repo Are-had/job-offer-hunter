@@ -1,8 +1,13 @@
 api_keys.txt
 data/
 .venv/
+.conda/
 __pycache__/
 .pytest_cache/
 .git/
 tests/
+backend/tests/
+frontend/node_modules/
+frontend/dist/
 websites*.html
+Offers/

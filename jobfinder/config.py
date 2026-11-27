@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent.parent  # data and keys live next to app.py
-DATA_DIR = APP_DIR / "data"
+# JOBFINDER_DATA_DIR: another data folder (the web version keeps its own database next to the Streamlit app's)
+DATA_DIR = Path(os.environ.get("JOBFINDER_DATA_DIR") or APP_DIR / "data")
 SECRETS_FILE = APP_DIR / "api_keys.txt"
 for _d in ("", "cvs", "letters"):
     (DATA_DIR / _d).mkdir(parents=True, exist_ok=True)
@@ -115,8 +117,6 @@ PROFILE_DEFAULT = {
     "offer_types": ["cdi", "cdd", "other"],
     "search_mode": "cv",  # cv: the research profile above, offers compared with the CVs | keywords: my_keywords alone
     "my_keywords": [],  # the words of a search by keywords (Search page)
-    "search_for": "",  # '' = you; a friend's name: a search by their keywords with their own Gemini key (Settings)
-    "people": {},  # {friend: {"keywords": [...]}}: each friend's keywords
     "keywords_rev": 3,  # the defaults' keyword revision this profile has received (see upgrade_profile)
 }
 # keywords added to the defaults after profiles were saved, by revision. A saved profile receives each revision once: the

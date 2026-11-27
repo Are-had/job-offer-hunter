@@ -163,8 +163,8 @@ def health_report() -> list:
 
 
 def get_key(provider, session_keys=None):
-    """The key of a slot ('gemini', 'gemini#2', 'gemini@ziyad'). A slot set to '' in the scan's keys stays without a key
-    (a search made for a friend does not fall back to your own Gemini key in the environment)."""
+    """The key of a slot ('gemini', 'gemini#2'): the scan's keys, else the environment. A slot set to '' in the scan's keys
+    stays without a key."""
     v = (session_keys or {}).get(provider)
     return v if v is not None else os.environ.get(ENV_KEYS.get(provider, ""), "")
 
@@ -443,14 +443,11 @@ def mark_gone(step, why):
 def model_chain(cfg, keys=None) -> list:
     """The models to try, best first: [(provider, model, key name)]. The model chosen in Settings comes last (Ollama: local)."""
     t = cfg["model"]
-    # a search made for a friend uses that friend's own Gemini key ('gemini@ziyad'), with its own quota record
-    friend = sorted(k for k in (keys or {}) if k.startswith(f"{t['provider']}@") and keys[k])
-    own = (t["provider"], t["model"], t["provider"] if get_key(t["provider"], keys) or not friend else friend[0])
+    own = (t["provider"], t["model"], t["provider"])
     if not cfg.get("auto_models"):
         return [own]
     gone = _gone()
-    slots = lambda p: (p, f"{p}#2", f"{p}#3", f"{p}#4", *sorted(k for k in (keys or {}) if k.startswith(f"{p}@")))
-    chain = [(p, m, slot) for p, m in LADDER for slot in slots(p) if get_key(slot, keys) and f"{slot}|{m}" not in gone]
+    chain = [(p, m, slot) for p, m in LADDER for slot in (p, f"{p}#2", f"{p}#3", f"{p}#4") if get_key(slot, keys) and f"{slot}|{m}" not in gone]
     if own not in chain and (t["provider"] not in PAID or get_key(own[2], keys)):
         chain.append(own)
     return chain or [own]

@@ -2,7 +2,7 @@
 
 Job Finder reads company and lab career websites and finds research and engineering offers in France. It dates each
 offer from evidence and ranks it with AI against a search profile and your CVs. It can also draft French cover letters
-in LaTeX. It is a single-user Streamlit app.
+in LaTeX. It is a single-user app: an API (FastAPI, `backend/`) and its pages (React, `frontend/`).
 
 ## Install
 
@@ -10,7 +10,7 @@ in LaTeX. It is a single-user Streamlit app.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-streamlit run app.py          # http://localhost:8501
+python -m uvicorn backend.app.main:app --port 8600   # http://127.0.0.1:8600 (Windows: setup.bat once, then run.bat)
 ```
 
 Optional: a LaTeX distribution (`latexmk`), to compile cover letters to PDF.
@@ -43,7 +43,7 @@ analyses everything again.
 
 ## AI keys
 
-Put the keys in `api_keys.txt`, next to `app.py`. The file is git-ignored. You can also enter them in Settings, or set
+Put the keys in `api_keys.txt`, at the root of the folder. The file is git-ignored. You can also enter them in Settings, or set
 them as environment variables.
 
 ```
@@ -267,7 +267,7 @@ button texts) is sent, never your details or a password, and the answer is saved
 
 ```bash
 docker build -t job-finder .
-docker run -d -p 127.0.0.1:8501:8501 --env-file api_keys.txt -v job-finder-data:/app/data job-finder
+docker run -d -p 127.0.0.1:8600:8600 --env-file api_keys.txt -v job-finder-data:/app/data job-finder
 ```
 
 ## Limits

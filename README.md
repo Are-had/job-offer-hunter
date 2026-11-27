@@ -8,7 +8,8 @@
 
 <p align="center">
   <img alt="Python" src="https://img.shields.io/badge/python-3.11-2E5AAC?logo=python&logoColor=white">
-  <img alt="Streamlit" src="https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white">
+  <img alt="React" src="https://img.shields.io/badge/UI-React%20%2B%20TypeScript-2E5AAC?logo=react&logoColor=white">
   <img alt="Playwright" src="https://img.shields.io/badge/browser-Playwright-2EAD33?logo=playwright&logoColor=white">
   <img alt="Tests" src="https://img.shields.io/badge/tests-252%20passing-2EA44F">
   <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue">
@@ -38,11 +39,14 @@ Changes made on top of the original project:
   on the Search page, and filter the results by contract.
 - **Search without AI.** A search by keywords can run with no AI call at all. When every AI quota runs out during a
   search, the search still goes to the end without AI. Offers that the AI did not read are marked *not checked by AI*.
-- **Searches for friends.** A friend can give their own Gemini key. A search made for them uses their key and their
-  keywords, and is never used for anyone else's search.
 - **Applied / removed / comments.** Mark an offer as applied, remove one that does not fit, or add a comment. Applied
   and removed offers never come back in the next searches, and a tracker of your applications can be exported as CSV.
 - **Live view of a search.** A spinning indicator and the offers found so far, each with its link, while the search runs.
+- **FastAPI + React instead of Streamlit.** A click only changes what it touches, the search's progress is pushed by the
+  server (Server-Sent Events) instead of polled, and a search keeps running when the page is closed. The API is
+  documented at `/docs`.
+- **Installed inside the folder.** `setup.bat` puts Python, Node.js, the packages and the browser in `.conda/`; nothing
+  is installed anywhere else on the computer.
 
 ## Why Job Finder
 
@@ -65,13 +69,21 @@ offer back with **evidence**: when it was published, where the job is, why it ma
 
 ## Quick start
 
+**Windows:** clone the repository, then double-click **`setup.bat`** once (it installs everything inside the folder, in
+`.conda/`), then **`run.bat`** each time: it opens <http://127.0.0.1:8600>. To uninstall, delete the folder.
+
+**By hand** (any system, Python 3.11 and Node.js 20+):
+
 ```bash
 git clone https://github.com/Are-had/job-offer-hunter.git && cd job-offer-hunter
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-streamlit run app.py            # opens http://localhost:8501
+(cd frontend && npm install && npm run build)          # the pages, served by the API
+python -m uvicorn backend.app.main:app --port 8600      # opens http://127.0.0.1:8600 (API docs: /docs)
 ```
+
+While working on the pages, `cd frontend && npm run dev` serves them with hot reload on :5173, the API proxied to :8600.
 
 Then, in the app:
 
@@ -84,7 +96,7 @@ Then, in the app:
 
 ```bash
 docker build -t job-finder .
-docker run -d -p 127.0.0.1:8501:8501 --env-file api_keys.txt -v job-finder-data:/app/data job-finder
+docker run -d -p 127.0.0.1:8600:8600 --env-file api_keys.txt -v job-finder-data:/app/data job-finder
 ```
 
 The app has no login: keep it on `127.0.0.1`, or reach it through an SSH tunnel or a proxy with authentication.
@@ -99,7 +111,7 @@ You do **not** need a collection of keys. **One key from one provider runs the w
 2. Click **Load the models** and pick a Claude model. Every offer is then analysed and matched with it.
 
 The same goes for a single **OpenAI**, **Gemini**, **Groq**, **OpenRouter**, **Cohere** or **NVIDIA** key, or a local
-**Ollama** model (free and private). Keys are kept in `api_keys.txt` next to `app.py` (git-ignored) or in environment
+**Ollama** model (free and private). Keys are kept in `api_keys.txt` at the root of the folder (git-ignored) or in environment
 variables, never in the code.
 
 Have several free keys? Switch on **automatic models**: Job Finder starts with the strongest model and moves on when a
@@ -238,8 +250,9 @@ stateDiagram-v2
 ## Project layout
 
 ```
-app.py              Streamlit app: Search, Results, Statistics, AI quota, Settings
-jobfinder/
+backend/app/        the API (FastAPI): websites, searches and their live progress, offers, your marks, settings
+frontend/src/       the pages (React + TypeScript): Search, Results, Statistics, AI quota, Settings
+jobfinder/          the engine
   scan.py           the scan: readers in parallel, filters, second try, resume
   crawler.py        generic reader: pages, sitemaps, browser rendering, Hellowork
   adapters.py       20+ job-platform readers and platform detection
@@ -250,7 +263,8 @@ jobfinder/
   dates.py          publication dates from evidence
   classify.py       France check, title rules, offer types
   store.py          SQLite storage, kept offers, scan record
-tests/              252 tests
+tests/              the engine's tests
+backend/tests/      the API's tests
 docs/HOW-IT-WORKS.md   every rule in detail
 websites*.html      the career-site lists
 ```

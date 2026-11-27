@@ -217,54 +217,24 @@ ENV_KEYS = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY", "ant
             "francetravail_id": "FRANCE_TRAVAIL_CLIENT_ID", "francetravail_secret": "FRANCE_TRAVAIL_CLIENT_SECRET"}
 
 
-# a friend's own Gemini key, for the searches made for that friend: GEMINI_API_KEY__ZIYAD=... -> slot 'gemini@ziyad'
-PERSON_KEY = re.compile(r"^GEMINI_API_KEY__([A-Z0-9_]{1,30})$")
-
-
-def person_name(name: str) -> str:
-    """'Ziyad B.' -> 'ziyad_b': the name a friend's key is saved under (letters, digits and '_')."""
-    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]", "_", (name or "").strip().lower())).strip("_")[:30]
-
-
-def _env_name(slot: str) -> str:
-    return f"GEMINI_API_KEY__{slot.split('@', 1)[1].upper()}" if slot.startswith("gemini@") else ENV_KEYS[slot]
-
-
 def load_keys() -> dict:
-    """Read api_keys.txt (lines like OPENAI_API_KEY=...) -> {provider: key}; a friend's Gemini key -> 'gemini@<name>'."""
+    """Read api_keys.txt (lines like OPENAI_API_KEY=...) -> {provider: key}."""
     out, inv = {}, {v: k for k, v in ENV_KEYS.items()}
     if SECRETS_FILE.exists():
         for line in SECRETS_FILE.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 name, val = line.split("=", 1)
-                m = PERSON_KEY.match(name.strip())
-                if m and val.strip():
-                    out[f"gemini@{m.group(1).lower()}"] = val.strip()
-                elif inv.get(name.strip()) and val.strip():
+                if inv.get(name.strip()) and val.strip():
                     out[inv[name.strip()]] = val.strip()
     return out
 
 
-def people(keys: dict) -> list[str]:
-    """The friends who gave their own Gemini key (Settings), by name."""
-    return sorted(k.split("@", 1)[1] for k in keys if k.startswith("gemini@"))
-
-
-def save_person_key(name: str, key: str) -> str:
-    """A friend's own Gemini key, saved under their name -> the name used."""
-    n, key = person_name(name), key.strip()
-    if not n:
-        raise ValueError("Give the friend's name (letters or digits)")
-    if not key or re.search(r"\s", key):
-        raise ValueError("Invalid key (empty or contains spaces/newlines)")
-    d = load_keys()
-    d[f"gemini@{n}"] = key
-    _write_keys(d)
-    return n
-
-
 def _write_keys(d: dict):
-    body = ["# API keys - private file, never commit it"] + [f"{_env_name(p)}={k}" for p, k in d.items()]
+    """The known keys, and every line of the file the app does not know (a key added by hand is never lost)."""
+    known = set(ENV_KEYS.values())
+    kept = [line for line in (SECRETS_FILE.read_text(encoding="utf-8").splitlines() if SECRETS_FILE.exists() else [])
+            if "=" in line and not line.lstrip().startswith("#") and line.split("=", 1)[0].strip() not in known]
+    body = ["# API keys - private file, never commit it"] + [f"{ENV_KEYS[p]}={k}" for p, k in d.items()] + kept
     SECRETS_FILE.write_text("\n".join(body) + "\n", encoding="utf-8")
     SECRETS_FILE.chmod(0o600)
 
