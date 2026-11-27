@@ -21,7 +21,7 @@ from .classify import (analyze_title, classify_location, clean_location, clean_t
 from .config import HW_KEYWORDS_URL, LOG, run_config, utcnow
 from .crawler import crawl_source, suggest_page
 from .dates import date_decision, range_start, refine_job_date, refine_raw_date
-from .store import (RECENT_HOURS, Job, MarketOffer, SeenOffer, SessionLocal, SiteMemory, Source, cv_key, keep_recent_offers,
+from .store import (MARK_STATES, RECENT_HOURS, Job, MarketOffer, OfferMark, SeenOffer, SessionLocal, SiteMemory, Source, cv_key, keep_recent_offers,
                     lock_scan, profile_key, restore_recent_offers, scan_ended, scan_record, scan_started, scan_todo,
                     unlock_scan)
 from .web import AccessError, Fetcher, html_to_text, norm, normalize_url
@@ -48,6 +48,9 @@ def upsert_job(s, src, raw, hidden=False) -> bool:
     url = normalize_url(raw["url"]) if raw.get("url") else ""
     ident = url or f"{src.id}:{raw.get('platform_id')}:{raw['title']}"
     uid = hashlib.sha1(ident.encode()).hexdigest()[:16]
+    mark = s.get(OfferMark, uid)
+    if mark is not None and mark.state in MARK_STATES:  # you applied to it or removed it: never added again
+        return False
     desc = "" if hidden else raw["description"]
     chash = hashlib.sha1(f"{raw['title']}|{raw['location']}|{raw['description'][:3000]}".encode()).hexdigest()
     job = s.query(Job).filter_by(uid=uid).first()

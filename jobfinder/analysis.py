@@ -15,7 +15,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
 
-from .classify import OFFER_TYPES, analyze_title, wanted_types
+from .classify import KIND_LABEL, OFFER_TYPES, analyze_title, contract_type, type_wanted, wanted_types
 from .config import run_config, utcnow
 from .cv import _ws, match_job
 from .dates import NO_DATE, date_candidates, date_decision, describe_candidates, parse_date, refine_job_date, text_publication_date
@@ -34,6 +34,7 @@ class JobAnalysis(BaseModel):
     role_type: Literal["research_ml", "engineering_software", "data", "sales_business", "admin_support", "other"] = "other"
     contract_kind: Literal["job", "internship", "apprenticeship", "phd_postdoc", "unknown"] = "unknown"
     contract_evidence: str = ""  # the words of the text that state the contract ('CDI', 'Stage de 6 mois')
+    contract_type: str = ""  # set by the app, not the AI: cdi | cdd | phd | postdoc | internship | apprenticeship | other | ''
     research_topics: list[str] = []
     location_text: str = ""
     country_code: str | None = None
@@ -97,16 +98,26 @@ def build_prompt(job, profile, text, cands, ti, second=False):
     want = wanted_types(profile)
     wanted = ", ".join(OFFER_TYPES[k] for k in OFFER_TYPES if k in want)
     unwanted = ", ".join(OFFER_TYPES[k] for k in OFFER_TYPES if k not in want) or "nothing"
+    if profile.get("keywords_only"):  # search by keywords: relevance is the match with the user's words, in any field
+        wants = (
+            f"The candidate searches by KEYWORDS: {', '.join(profile['keywords'][:150])}\n"
+            "The candidate wants: offers located in FRANCE (or remote and explicitly open to France), published recently, "
+            "whose work matches at least one keyword (in French or English, synonyms and translations included). "
+            "is_relevant = the work described matches a keyword; relevance_score = how closely. "
+            f"WANTED kinds of offer: {wanted}. NOT wanted: {unwanted}.\n")
+    else:
+        wants = (
+            f"Candidate research profile: {profile['description']}\nTarget topics: {', '.join(profile['keywords'][:150])}\n"
+            "The candidate wants: offers located in FRANCE (or remote and explicitly open to France), published recently; "
+            "research / applied-science / machine-learning / deep-learning / vision / audio-speech / signal / robotics work. "
+            "Offers may be written in French or English. An offer can be a classic job title or a RESEARCH SUBJECT (the title "
+            "states a scientific problem, e.g. 'Apprentissage profond pour la segmentation d'images médicales'): judge both by "
+            "the work described. "
+            f"WANTED kinds of offer: {wanted}. NOT wanted: {unwanted}; and sales, business-development, marketing, management, admin or support roles even "
+            "if the title mentions AI. A software title can qualify if the work is closely related to the profile.\n")
     return (
         ("INDEPENDENT SECOND READING of this offer: judge the work described from the text alone.\n" if second else "") +
-        f"Candidate research profile: {profile['description']}\nTarget topics: {', '.join(profile['keywords'][:150])}\n"
-        "The candidate wants: offers located in FRANCE (or remote and explicitly open to France), published recently; "
-        "research / applied-science / machine-learning / deep-learning / vision / audio-speech / signal / robotics work. "
-        "Offers may be written in French or English. An offer can be a classic job title or a RESEARCH SUBJECT (the title "
-        "states a scientific problem, e.g. 'Apprentissage profond pour la segmentation d'images médicales'): judge both by "
-        "the work described. "
-        f"WANTED kinds of offer: {wanted}. NOT wanted: {unwanted}; and sales, business-development, marketing, management, admin or support roles even "
-        "if the title mentions AI. A software title can qualify if the work is closely related to the profile.\n"
+        wants +
         f"Title analysis by rules: kind={ti.kind}, role='{ti.role}', topics={ti.topics}, contract='{ti.contract}'.\n"
         "PUBLICATION DATE: below is the numbered list of every date written in the offer, with its role. Answer "
         "publication_date_choice = the NUMBER of the date on which the offer was published or posted. Never choose a "
@@ -185,7 +196,12 @@ def analyze_job(s, job: Job, profile, cfg, keys=None, second=False):
         said = q.training or ("job" if q.contract in ("cdi", "cdd", "freelance", "interim") else "")
         if said and said != res.contract_kind and not (said == "job" and res.contract_kind == "phd_postdoc"):
             res.contract_kind = said  # 'contrat CDD 6 mois' quoted for an internship: a job (a post-doc is a CDD too)
-    proven = lambda ev: bool(ev) and len(_ws(ev)) >= 4 and _ws(ev) in _ws(full)
+    # the exact type (CDI, CDD, PhD, post-doc...): from the title, the website's employment type and the AI's quote when the
+    # text really holds it; '' when none of them says it
+    quoted = res.contract_evidence if len(ev) >= 3 and re.search(rf"(?<!\w){re.escape(ev)}(?!\w)",
+                                                                 _ws(f"{job.title} {full}")) else ""
+    res.contract_type = contract_type(res.contract_kind, job.title, job.employment_type, quoted)
+    proven =lambda ev: bool(ev) and len(_ws(ev)) >= 4 and _ws(ev) in _ws(full)
     flags = []
     # ---- publication date: deterministic text evidence first, then the AI's choice among the dates of the text
     refine_job_date(job)  # an explicit 'Date de publication : ...' in the description beats a feed / refresh date
@@ -227,12 +243,13 @@ def analyze_job(s, job: Job, profile, cfg, keys=None, second=False):
     # matches chatbot project managers and AI transformation consultants, which the model rightly turns down
     hits = re.findall(r"'([^']+)'", ti.reason) if ti.reason.startswith("title matches") else []
     title_match = ti.verdict == "pass" and (not hits or any(" " in h or "&" in h for h in hits))
-    if res.role_type in ("sales_business", "admin_support"):
+    if res.role_type in ("sales_business", "admin_support") and not profile.get("keywords_only"):  # keywords: any field
         if not title_match:
             return _exclude(s, job, res, f"role: {res.role_type} - {res.reasoning_summary}")
         flags.append("AI_says_non_technical_role_but_the_title_matches_your_profile")
-    if res.contract_kind not in ("unknown", *wanted_types(profile)):
-        return _exclude(s, job, res, f"contract: {OFFER_TYPES[res.contract_kind]} not wanted - {res.reasoning_summary}")
+    if not type_wanted(res.contract_kind, res.contract_type, wanted_types(profile)):
+        what = KIND_LABEL[res.contract_type or res.contract_kind]
+        return _exclude(s, job, res, f"contract: {what} not wanted - {res.reasoning_summary}")
     if not res.is_relevant or res.relevance_score < cfg["min_relevance"]:
         if not title_match:
             return _exclude(s, job, res, f"AI relevance {res.relevance_score:.0f}: {res.reasoning_summary}")
@@ -313,6 +330,9 @@ def analyze_pipeline(cfg, profile, keys, prog, feed=None):
     every offer waiting now), then CV matching on relevant jobs."""
     from .browser import ThreadedRenderer
     cfg = run_config(cfg)
+    if cfg.get("ai_analysis") is False:  # search by keywords without the AI: no call at all for the offers
+        _without_ai(cfg, prog, feed)
+        return
     rend = ThreadedRenderer(cfg, Fetcher(cfg, prog.say))  # a browser is started only if a job page really needs one
     try:
         _pipeline(cfg, profile, keys, prog, rend, feed)
@@ -321,6 +341,55 @@ def analyze_pipeline(cfg, profile, keys, prog, feed=None):
         from .market import run_if_due
         with SessionLocal() as s:
             run_if_due(s, force=bool(cfg.get("stats_with_scan")))  # market history; statistics every 15 days or on request
+
+
+NOT_CHECKED = "not checked by AI"
+
+
+def _without_ai(cfg, prog, feed=None, why=""):
+    """The analysis turned off (a search by keywords), or stopped (why: every AI quota out, no credits, no key): every
+    offer the rules kept - its title, its date in the range, in France - is a result as it is: 'Relevant' when nothing is
+    in doubt, 'To check' when its place or date is (as the rules left it). No relevance score, no CV match, nothing for the
+    statistics. The next scan analyses these offers with the AI again (they are not kept as analysed)."""
+    def relevant():
+        with SessionLocal() as c:
+            return c.query(Job).filter(Job.status == "relevant").count()
+
+    if why:
+        prog.say(f"{why} - the search goes on to the end without AI")
+        prog.set(ai_msg=f"{why}. The search went on without AI: the other offers kept by the rules are listed as they "
+                        f"are ('{NOT_CHECKED}').")
+    else:
+        prog.set(ai_msg="AI analysis off: the offers that match your keywords are listed as they are (not checked by AI).")
+    if feed is None:  # every offer waiting now
+        feed = Feed()
+        with SessionLocal() as s:
+            prog.set(ai_total=feed.put(s.query(Job).filter(Job.status.in_(["candidate", "review"]),
+                                                          Job.relevance_score.is_(None)).all()), ai_done=0)
+        feed.close()
+    while not prog.cancel.is_set():
+        item = feed.get()
+        if item is None:
+            if feed.closed.is_set():
+                break
+            time.sleep(0.2)
+            continue
+        jid = item[1]
+        with SessionLocal() as s:
+            j = s.get(Job, jid)
+            if j is not None and j.status in ("candidate", "review"):
+                j.status = "relevant" if j.status == "candidate" else "review"
+                j.reason = f"{(j.reason or '').removeprefix('title: ').split('; date:')[0]} - {NOT_CHECKED}"
+                j.extra = {**(j.extra or {}), "ai_model": NOT_CHECKED}
+                s.commit()
+        feed.done(jid)
+        prog.inc("ai_done")
+        prog.set(relevant=relevant())
+    with SessionLocal() as s:  # the same offer found on two websites: shown once
+        n = merge_duplicates(s, cfg)
+    if n:
+        prog.inc("dups_merged", n)
+    prog.set(relevant=relevant())
 
 
 def _by_priority(jobs):
@@ -522,14 +591,21 @@ def _pipeline(cfg, profile, keys, prog, rend, feed=None):
     for th in threads:
         th.join()
     _say_models(prog, t0)
-    if stop.is_set() or prog.cancel.is_set():
+    if prog.cancel.is_set():
+        return
+    if stop.is_set():  # the AI stopped (every quota out, no credits, no key): the search still goes to the end, without it
+        with SessionLocal() as s:
+            left = s.query(Job).filter(Job.status.in_(["candidate", "review"]), Job.relevance_score.is_(None)).all()
+            prog.inc("ai_total", feed.put(left))  # the offers it gave up, beside those still waiting in the queue
+        _without_ai(cfg, prog, feed, why=prog.snap()[0]["ai_msg"])
         return
     with SessionLocal() as s:  # the same offer read on two websites while both were being read: shown once
         n = merge_duplicates(s, cfg)
     if n:
         prog.inc("dups_merged", n)
         prog.set(relevant=relevant())
-    _match_cvs(cfg, keys, prog, workers)
+    if not profile.get("keywords_only"):  # a search by keywords ranks by the keywords alone: no CV comparison
+        _match_cvs(cfg, keys, prog, workers)
 
 
 def _say_models(prog, t0):

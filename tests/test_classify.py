@@ -173,3 +173,31 @@ def test_an_offer_placed_abroad_that_can_be_held_in_france_is_found():
                  "Agile environments Nice to Have Experience with Rust",
                  "our offices in Paris, London, New York and Singapore"):
         assert not f(text), text
+
+
+def test_each_contract_type_is_chosen_alone():
+    """The user's request (27 Nov 2026): CDI, CDD, PhD, post-doc, internship, apprenticeship, each one picked on its own."""
+    from jobfinder.classify import contract_type, type_wanted, wanted_types
+    assert wanted_types({"offer_types": ["job", "phd_postdoc"]}) == {"cdi", "cdd", "other", "phd", "postdoc"}  # older profiles
+    cdi = {**P, "offer_types": ["cdi"]}
+    assert analyze_title("CDI Ingénieur Machine Learning", "", cdi).verdict == "pass"
+    assert analyze_title("CDD Ingénieur Machine Learning 12 mois", "", cdi).verdict == "reject"
+    assert analyze_title("Ingénieur Machine Learning", "", cdi).verdict == "pass"  # contract not stated: kept
+    assert analyze_title("Postdoc in speech enhancement", "", cdi).verdict == "reject"
+    phd = {**P, "offer_types": ["phd"]}
+    assert analyze_title("PhD position in deep learning for lidar", "", phd).verdict == "pass"
+    assert analyze_title("Postdoc in speech enhancement", "", phd).verdict == "reject"
+    assert analyze_title("Postdoc in speech enhancement", "", {**P, "offer_types": ["postdoc"]}).verdict == "pass"
+    assert contract_type("phd_postdoc", "Post-doc", "CDD 24 mois") == "postdoc"  # a post-doc is a CDD too: still a post-doc
+    assert contract_type("job", "Ingénieur", "Full-time, permanent (CDI)") == "cdi" and contract_type("job", "Ingénieur") == ""
+    assert type_wanted("job", "", {"cdd"}) and not type_wanted("job", "cdi", {"cdd"}) and type_wanted("unknown", "", {"phd"})
+
+
+def test_search_by_keywords_uses_the_keywords_alone():
+    from jobfinder.config import run_profile
+    kw = run_profile({**P, "search_mode": "keywords", "my_keywords": ["comptable", " business developer "]})
+    assert kw["keywords"] == ["comptable", "business developer"] and kw["keywords_only"]
+    assert run_profile(kw) == kw and run_profile(P) is P  # applied twice: the same; a search by CV: the profile itself
+    assert analyze_title("Comptable fournisseurs H/F", "", kw).verdict == "pass"  # excluded by the research profile, wanted here
+    assert analyze_title("Business Developer IA", "", kw).verdict == "pass"
+    assert analyze_title("Data Scientist", "", kw).verdict == "reject"  # none of the keywords

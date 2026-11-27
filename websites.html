@@ -7,69 +7,143 @@
     <script>
         // Add your URLs here
         const urls = [
-            
-            'https://careers.lkqeurope.com/',
-            'https://expleo-jobs-fr-fr.icims.com/jobs/search',
-            'https://jobs.greiner.com/search?locale=en_US',
-            'https://faac-group.breezy.hr/',
-            'https://jobs.makesense.org/en/s/jobs/all/all?s=Data+scientist&partnersOffers=true',
-            'https://www.francetravail.fr/accueil',  // not screened (checked 7-9 Nov 2026): read only through the official France Travail API, whose access is still pending
-            'https://jobsinparis.fr/jobs/Research',
-            'https://www.mitsubishielectric-rce.eu/jobs',
-            'https://recrutement.mitsubishielectric.fr/accueil.aspx?LCID=1036',
-            'https://www.optioncarriere.com/emploi?s=AI+Research+Scientist&l=France&cp=f',  // not screened (checked 7-9 Nov 2026): its search pages are protected by a captcha
-            'https://emploi.elsys-design.com/offers',
-            'https://valeo.wd3.myworkdayjobs.com/en-EN/valeo_jobs',
-            'https://www.equans.com/join-us',  // not screened (checked 7-9 Nov 2026): the website refuses automated access (HTTP 403)
-            'https://octo.com/recrutement/nos-offres',
-            'https://choisirleservicepublic.gouv.fr/nos-offres/filtres/mot-cles/data/type/2349-2267',
-            'https://www.ubisoft.com/fr-fr/company/careers/search',
-            'https://www.randstaddigital.fr/fr/carrieres/toutes-nos-offres',
-            'https://scai.sorbonne-universite.fr/jobs',
-            'https://careers.idemia.com/',
-            'https://careers.publicisgroupe.com/jobs',
-            'https://www.accenture.com/fr-fr/careers/jobsearch',
-            'https://jobs.blablacar.com/vacancies',
-            'https://www.sqli.com/int-en/careers/our-jobs',
-            'https://careers.smartrecruiters.com/devoteam',
-            'https://www.inetum.com/fr/accueil/carrieres/jobs.html',  // not screened (checked 7-9 Nov 2026): the website refuses automated access (HTTP 406)
-            'https://carrieresfrance.bearingpoint.com/',
-            'https://www.wavestone.com/en/careers/our-offers',
-            'https://cgi.njoyn.com/corp/xweb/xweb.asp?CLID=21001&page=joblisting&lang=2',
-            'https://eviden.com/fr-fr/carrieres',
-            'https://sii-group.com/en-FR/join-us',
-            'https://aubay.com/jobs',
-            'https://www.magellangroup.eu/careers/job-opportunities',
-            'https://onepoint.wd3.myworkdayjobs.com/fr-FR/OnepointFR',
-            'https://www.catamania.com/recrutement',
-            'https://careers.scalian.com/jobs',
-            'https://www.hardis-group.com/en/job-offers',
-            'https://jobs.smile.eu/jobs',
-            'https://jobs.keyrus.fr/jobs',
-            'https://www.talan.com/global/en/join-us/our-job-offers',
-            'https://careers.smartrecruiters.com/epsa',
-            'https://jobs.zenika.com/jobs',
-            'https://carrieres.conserto.pro/jobs',
-            'https://careers.smartrecruiters.com/NEXTON',
-            'https://www.smartpoint.fr/carrieres/toutes-nos-opportunites',
-            'https://jobs.jems-group.com/',
-            'https://join.novencia.com/nous-rejoindre',
-            'https://career.solutec.fr/',
-            'https://acensi.group/fr/offres-demploi',  // not screened (checked 7-9 Nov 2026): the website refuses automated access (HTTP 403)
-            'https://www.neurones.net/fr/offres-emplois',
-            'https://www.viveris.fr/nous-rejoindre',
-            'https://www.hellowork.com/fr-fr/entreprises/-proxiad--86909.html',
-            'https://www.synchrone.fr/fr/carrieres',  // not screened (checked 7-9 Nov 2026): no offer can be read on the page, even with the AI browser
-            'https://www.cellenza.com/jobs',
-            'https://sanofi.wd3.myworkdayjobs.com/fr-FR/SanofiCareers',
-            'https://bluethink.fr/fr/offres-demploi',
-            'https://centreborelli.ens-paris-saclay.fr/fr/offres-demploi-post-doc-these'
 
-          
+        // ════════ TA LISTE D'ORIGINE ════════
+        'https://careers.lkqeurope.com/',
+        'https://expleo-jobs-fr-fr.icims.com/jobs/search',
+        'https://jobs.greiner.com/search?locale=en_US',
+        'https://faac-group.breezy.hr/',
+        'https://jobs.makesense.org/en/s/jobs/all/all?s=Data+scientist&partnersOffers=true',
+        'https://www.francetravail.fr/accueil',  // not screened (checked 7-9 Nov 2026): read only through the official France Travail API, whose access is still pending
+        'https://jobsinparis.fr/jobs/Research',
+        'https://www.mitsubishielectric-rce.eu/jobs',
+        'https://recrutement.mitsubishielectric.fr/accueil.aspx?LCID=1036',
+        'https://www.optioncarriere.com/emploi?s=AI+Research+Scientist&l=France&cp=f',  // not screened (checked 7-9 Nov 2026): its search pages are protected by a captcha
+        'https://emploi.elsys-design.com/offers',
+        'https://valeo.wd3.myworkdayjobs.com/en-EN/valeo_jobs',
+        'https://www.equans.com/join-us',  // not screened (checked 7-9 Nov 2026): the website refuses automated access (HTTP 403)
+        'https://octo.com/recrutement/nos-offres',
+        'https://choisirleservicepublic.gouv.fr/nos-offres/filtres/mot-cles/data/type/2349-2267',
+        'https://www.ubisoft.com/fr-fr/company/careers/search',
+        'https://www.randstaddigital.fr/fr/carrieres/toutes-nos-offres',
+        'https://scai.sorbonne-universite.fr/jobs',
+        'https://careers.idemia.com/',
+        'https://careers.publicisgroupe.com/jobs',
+        'https://www.accenture.com/fr-fr/careers/jobsearch',
+        'https://jobs.blablacar.com/vacancies',
+        'https://www.sqli.com/int-en/careers/our-jobs',
+        'https://careers.smartrecruiters.com/devoteam',
+        'https://www.inetum.com/fr/accueil/carrieres/jobs.html',  // not screened (checked 7-9 Nov 2026): the website refuses automated access (HTTP 406)
+        'https://carrieresfrance.bearingpoint.com/',
+        'https://www.wavestone.com/en/careers/our-offers',
+        'https://cgi.njoyn.com/corp/xweb/xweb.asp?CLID=21001&page=joblisting&lang=2',
+        'https://eviden.com/fr-fr/carrieres',
+        'https://sii-group.com/en-FR/join-us',
+        'https://aubay.com/jobs',
+        'https://www.magellangroup.eu/careers/job-opportunities',
+        'https://onepoint.wd3.myworkdayjobs.com/fr-FR/OnepointFR',
+        'https://www.catamania.com/recrutement',
+        'https://careers.scalian.com/jobs',
+        'https://www.hardis-group.com/en/job-offers',
+        'https://jobs.smile.eu/jobs',
+        'https://jobs.keyrus.fr/jobs',
+        'https://www.talan.com/global/en/join-us/our-job-offers',
+        'https://careers.smartrecruiters.com/epsa',
+        'https://jobs.zenika.com/jobs',
+        'https://carrieres.conserto.pro/jobs',
+        'https://careers.smartrecruiters.com/NEXTON',
+        'https://www.smartpoint.fr/carrieres/toutes-nos-opportunites',
+        'https://jobs.jems-group.com/',
+        'https://join.novencia.com/nous-rejoindre',
+        'https://career.solutec.fr/',
+        'https://acensi.group/fr/offres-demploi',  // not screened (checked 7-9 Nov 2026): the website refuses automated access (HTTP 403)
+        'https://www.neurones.net/fr/offres-emplois',
+        'https://www.viveris.fr/nous-rejoindre',
+        'https://www.hellowork.com/fr-fr/entreprises/-proxiad--86909.html',
+        'https://www.synchrone.fr/fr/carrieres',  // not screened (checked 7-9 Nov 2026): no offer can be read on the page, even with the AI browser
+        'https://www.cellenza.com/jobs',
+        'https://sanofi.wd3.myworkdayjobs.com/fr-FR/SanofiCareers',
+        'https://bluethink.fr/fr/offres-demploi',
+        'https://centreborelli.ens-paris-saclay.fr/fr/offres-demploi-post-doc-these',
+
+        // ════════ RECHERCHE PUBLIQUE : CDD + THÈSES ════════
+        'https://emploi.cnrs.fr/Offres/Recherche.aspx',                         // ✅ CNRS (POST avec Page=N)
+        'https://jobs.inria.fr/public/classic/fr/offres?filtre=doctorants',     // ✅ Inria thèses
+        'https://jobs.inria.fr/public/classic/fr/offres?filtre=ingenieurs',     // ✅ Inria CDD ingénieurs
+        'https://instn.cea.fr/en/these/',                                       // ✅ CEA thèses (?_pagination=N)
+        'https://www.theses-postdocs.cea.fr/',                                  // ✅ CEA thèses/postdocs
+        'https://www.emploi.cea.fr/',                                           // ✅ CEA emplois
+        'https://jobs.inrae.fr/',                                               // ✅ INRAE
+        'https://choisirleservicepublic.gouv.fr/nos-offres/filtres/organisme/10720/', // ✅ INRAE via CSP
+        'https://emploi-recrutement.ird.fr/',                                   // ✅ IRD
+        'https://brgm-recrute.talent-soft.com/',                                // ✅ BRGM
+        'https://recrutement.cnes.fr/',                                         // ✅ CNES (thèses : campagne au 1er trimestre)
+        'https://cnes.fr/fr/theses-post-doctorats',                             // ✅ CNES infos thèses
+        'https://w3.onera.fr/formationparlarecherche/',                         // ✅ ONERA (sujets en PDF)
+        'https://careers.flatchr.io/fr/company/meteofrance',                    // ✅ Météo-France
+        'https://cnrm.sedoo.fr/',                                               // ✅ CNRM (fiches PDF)
+        'https://www.lsce.ipsl.fr/emploi/',                                     // ✅ LSCE
+        'https://internships-climate.ipsl.fr/',                                 // ✅ IPSL
+        'https://choisirleservicepublic.gouv.fr/nos-offres/filtres/mot-cles/teledetection/', // ⚠️
+        'https://choisirleservicepublic.gouv.fr/nos-offres/filtres/mot-cles/apprentissage/', // ⚠️
+        'https://choisirleservicepublic.gouv.fr/nos-offres/filtres/mot-cles/satellite/',     // ⚠️
+
+        // ════════ AGRÉGATEURS THÈSES / ACADÉMIQUE ════════
+        'https://emploi.abg.asso.fr/fr/candidatOffres',                         // ✅ ABG (AJAX POST /recherche/page/N)
+        'https://doctorat.campusfrance.org/en/phd/offers',                      // ✅ Campus France
+        'https://www.adum.fr/as/ed/propositionFR.pl?site=adumR',                // ✅ ADUM (toutes ED)
+        'https://adum.fr/psaclay/pt',                                           // ✅ ADUM Paris-Saclay
+        'https://academicpositions.fr/',                                        // ✅ Academic Positions
+        'https://euraxess.ec.europa.eu/jobs/search',                            // ⚠️ Euraxess
+        'https://gdr-iasis.cnrs.fr/kiosque/',                                   // ✅ GdR IASIS (signal/image)
+        'https://www.dataia.eu/offres',                                         // ✅ DATAIA
+        'https://aniti.univ-toulouse.fr/',                                      // ✅ ANITI
+        'https://www.hi-paris.fr/',                                             // ⚠️ Hi! PARIS
+        'https://3ia.univ-cotedazur.eu/',                                       // ⚠️ 3IA Côte d'Azur
+        'https://miai.univ-grenoble-alpes.fr/',                                 // ⚠️ MIAI Grenoble
+
+        // ════════ EUROPE : MÉTÉO / ESPACE ════════
+        'https://www.egu.eu/jobs/',                                             // ✅ EGU
+        'https://www.eumetsat.int/vacancies',                                   // ✅ EUMETSAT
+        'https://jobs.ecmwf.int/Home/Job',                                      // ✅ ECMWF
+        'https://jobs.esa.int/',                                                // ⚠️ ESA
+
+        // ════════ CONSTRUCTEURS AUTO ════════
+        'https://www.renaultgroup.com/en/careers',                               // ✅ Renault Group
+        'https://renault.wd3.myworkdayjobs.com/',                               // ✅ Renault (Workday, toutes marques + Ampere)
+        'https://careers.stellantis.com/',                                      // ✅ Stellantis
+        'https://psa-recrute.talent-soft.com/',                                 // ✅ Stellantis France (Talentsoft)
+
+        // ════════ ÉQUIPEMENTIERS ════════
+        'https://www.forvia.com/careers',                                       // ✅ Forvia
+        'https://jobs.faurecia.com/careers',                                    // ✅ Forvia/Faurecia (moteur de recherche)
+        'https://jobs.bosch.com/',                                              // ⚠️ Bosch
+        'https://jobs.continental.com/',                                        // ⚠️ Continental
+        'https://jobs.zf.com/',                                                 // ⚠️ ZF
+        'https://careers.michelin.com/',                                        // ⚠️ Michelin
+        'https://www.opmobility.com/fr/carrieres',                              // ⚠️ OPmobility (ex-Plastic Omnium)
+
+        // ════════ SOCIÉTÉS D'INGÉNIERIE (prestataires Renault/Stellantis) ════════
+        'https://www.alten.com/careers/',                                       // ✅ Alten
+        'https://www.akkodis.com/fr-fr/careers',                                // ⚠️ Akkodis
+        'https://www.capgemini.com/fr-fr/carrieres/offres-emploi/',             // ⚠️ Capgemini (+ Capgemini Engineering)
+        'https://www.segulatechnologies.com/fr/carrieres/',                     // ⚠️ Segula
+        'https://www.assystem.com/fr/carrieres/',                               // ⚠️ Assystem
+        'https://www.avl.com/fr/carrieres',                                     // ⚠️ AVL France
+        'https://www.fev.com/fr/carrieres.html',                                // ⚠️ FEV France
+        'https://www.davidson.fr/carrieres',                                    // ⚠️ Davidson
+        'https://careers.soprasteria.com/',                                     // ⚠️ Sopra Steria
+
+        // ════════ AÉRO / SPATIAL / OBSERVATION DE LA TERRE ════════
+        'https://www.safran-group.com/jobs',                                    // ✅ Safran
+        'https://careers.thalesgroup.com/',                                     // ⚠️ Thales + Thales Alenia Space
+        'https://ag.wd3.myworkdayjobs.com/Airbus',                              // ⚠️ Airbus (Defence & Space)
+        'https://www.cls.fr/carrieres/',                                        // ⚠️ CLS (filiale CNES)
+        'https://careers.3ds.com/',                                             // ⚠️ Dassault Systèmes
         ];
         
         // Open each URL in a new tab
-        urls.forEach(url => {
+        urls.forEach(url => {       
             window.open(url, '_blank');
         });
         

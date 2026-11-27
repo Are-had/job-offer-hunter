@@ -23,7 +23,26 @@
   <a href="docs/HOW-IT-WORKS.md">Full reference</a>
 </p>
 
+> **Credits.** This project is based on [Job Finder by Zinou](https://github.com/2ineddine/scrape-Job-websites)
+> and updated by Arezki. See [What's new in this version](#whats-new-in-this-version).
+
 ---
+
+## What's new in this version
+
+Changes made on top of the original project:
+
+- **Two ways to search.** *By my CV* (as before: research profile, then a match score with your CV) or *by keywords*:
+  only offers whose title holds one of your keywords, in any field.
+- **Each contract type on its own.** CDI, CDD, PhD, post-doc, internship, apprenticeship, other jobs: pick them one by one
+  on the Search page, and filter the results by contract.
+- **Search without AI.** A search by keywords can run with no AI call at all. When every AI quota runs out during a
+  search, the search still goes to the end without AI. Offers that the AI did not read are marked *not checked by AI*.
+- **Searches for friends.** A friend can give their own Gemini key. A search made for them uses their key and their
+  keywords, and is never used for anyone else's search.
+- **Applied / removed / comments.** Mark an offer as applied, remove one that does not fit, or add a comment. Applied
+  and removed offers never come back in the next searches, and a tracker of your applications can be exported as CSV.
+- **Live view of a search.** A spinning indicator and the offers found so far, each with its link, while the search runs.
 
 ## Why Job Finder
 
@@ -250,4 +269,5 @@ Please add a test with the fix (`tests/`), and run `python -m pytest -q` before 
 
 ## License
 
-[Apache 2.0](LICENSE).
+[Apache 2.0](LICENSE). Original work by [Zinou](https://github.com/2ineddine/scrape-Job-websites); modified by Arezki
+(see [What's new in this version](#whats-new-in-this-version)).

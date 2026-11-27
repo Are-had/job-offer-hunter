@@ -8,7 +8,7 @@ import os
 import re
 from urllib.parse import urlparse
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String, Text, create_engine, event
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String, Text, create_engine, event, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import APP_DIR, DATA_DIR, LOG, SECRETS_FILE, utcnow
@@ -50,6 +50,17 @@ class SeenOffer(Base):  # kept between sessions: an offer cannot be younger than
     __tablename__ = "seen_offers"
     uid = Column(String, primary_key=True)
     first_seen = Column(DateTime, default=utcnow)
+
+
+class OfferMark(Base):  # kept between sessions: what YOU did with an offer, and your comment
+    __tablename__ = "offer_marks"
+    uid = Column(String, primary_key=True)  # Job.uid: the offer's address, the same in every scan
+    state = Column(String, default="")  # applied | dismissed (removed: not for me) | '' (a comment only)
+    note = Column(Text, default="")
+    title = Column(String, default="")
+    employer = Column(String, default="")
+    url = Column(String, default="")
+    updated = Column(DateTime, default=utcnow)
 
 
 class MarketOffer(Base):  # kept between sessions (6 months): facts of each analysed offer, for the statistics page
@@ -206,20 +217,54 @@ ENV_KEYS = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY", "ant
             "francetravail_id": "FRANCE_TRAVAIL_CLIENT_ID", "francetravail_secret": "FRANCE_TRAVAIL_CLIENT_SECRET"}
 
 
+# a friend's own Gemini key, for the searches made for that friend: GEMINI_API_KEY__ZIYAD=... -> slot 'gemini@ziyad'
+PERSON_KEY = re.compile(r"^GEMINI_API_KEY__([A-Z0-9_]{1,30})$")
+
+
+def person_name(name: str) -> str:
+    """'Ziyad B.' -> 'ziyad_b': the name a friend's key is saved under (letters, digits and '_')."""
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]", "_", (name or "").strip().lower())).strip("_")[:30]
+
+
+def _env_name(slot: str) -> str:
+    return f"GEMINI_API_KEY__{slot.split('@', 1)[1].upper()}" if slot.startswith("gemini@") else ENV_KEYS[slot]
+
+
 def load_keys() -> dict:
-    """Read api_keys.txt (lines like OPENAI_API_KEY=...) -> {provider: key}."""
+    """Read api_keys.txt (lines like OPENAI_API_KEY=...) -> {provider: key}; a friend's Gemini key -> 'gemini@<name>'."""
     out, inv = {}, {v: k for k, v in ENV_KEYS.items()}
     if SECRETS_FILE.exists():
         for line in SECRETS_FILE.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 name, val = line.split("=", 1)
-                if inv.get(name.strip()) and val.strip():
+                m = PERSON_KEY.match(name.strip())
+                if m and val.strip():
+                    out[f"gemini@{m.group(1).lower()}"] = val.strip()
+                elif inv.get(name.strip()) and val.strip():
                     out[inv[name.strip()]] = val.strip()
     return out
 
 
+def people(keys: dict) -> list[str]:
+    """The friends who gave their own Gemini key (Settings), by name."""
+    return sorted(k.split("@", 1)[1] for k in keys if k.startswith("gemini@"))
+
+
+def save_person_key(name: str, key: str) -> str:
+    """A friend's own Gemini key, saved under their name -> the name used."""
+    n, key = person_name(name), key.strip()
+    if not n:
+        raise ValueError("Give the friend's name (letters or digits)")
+    if not key or re.search(r"\s", key):
+        raise ValueError("Invalid key (empty or contains spaces/newlines)")
+    d = load_keys()
+    d[f"gemini@{n}"] = key
+    _write_keys(d)
+    return n
+
+
 def _write_keys(d: dict):
-    body = ["# API keys - private file, never commit it"] + [f"{ENV_KEYS[p]}={k}" for p, k in d.items()]
+    body = ["# API keys - private file, never commit it"] + [f"{_env_name(p)}={k}" for p, k in d.items()]
     SECRETS_FILE.write_text("\n".join(body) + "\n", encoding="utf-8")
     SECRETS_FILE.chmod(0o600)
 
@@ -361,14 +406,43 @@ def unlock_scan():
         SCAN_LOCK.unlink(missing_ok=True)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this id is running. On Windows os.kill(pid, 0) is not a check: signal 0 is CTRL_C_EVENT
+    (it sends Ctrl+C to a process group, or fails with WinError 87), so the process is opened and its exit code read."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists but belongs to another user
+        try:
+            code = wintypes.DWORD()
+            return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def scan_owner():
     """The process id of a scan still running, or None (a lock left by a stopped process does not count)."""
     try:
         pid = int(SCAN_LOCK.read_text().strip())
-        os.kill(pid, 0)
-        return pid
     except (OSError, ValueError):
         return None
+    return pid if _pid_alive(pid) else None
 
 
 def scan_running_elsewhere() -> bool:
@@ -400,6 +474,36 @@ def wipe_session_data() -> bool:
     except Exception as e:  # pragma: no cover
         LOG.warning("wipe failed: %s", e)
     return True
+
+
+# --------------------------------------------------------------------------- your marks: applied, removed, comments
+MARK_STATES = ("applied", "dismissed")  # an offer in one of these states never comes back in a search
+
+
+def mark_offer(s, job, state=None, note=None) -> OfferMark:
+    """Remember what you did with an offer (state: 'applied', 'dismissed' or '' to undo; None: unchanged) and your comment
+    (None: unchanged). A removed offer leaves the results now; applied or removed, it is not added again by the next
+    searches. The record stays when the session's offers are deleted."""
+    m = s.get(OfferMark, job.uid) or OfferMark(uid=job.uid, state="", note="")
+    if m not in s:
+        s.add(m)
+    if state is not None:
+        m.state = state
+    if note is not None:
+        m.note = note.strip()
+    m.title, m.employer, m.url = job.title or "", job.employer or "", job.apply_url or job.url or ""
+    m.updated = utcnow()
+    if m.state == "dismissed":
+        job.status, job.reason = "dismissed", "removed by you" + (f": {m.note}" if m.note else "")
+    elif job.status == "dismissed":  # put back: it goes through the filters (and the AI) again
+        job.status, job.reason = "new", ""
+    s.commit()
+    return m
+
+
+def marked_uids(s) -> set:
+    """The offers you applied to or removed: never added again by a search."""
+    return {u for (u,) in s.query(OfferMark.uid).filter(OfferMark.state.in_(MARK_STATES))}
 
 
 # --------------------------------------------------------------------------- offers kept 24 hours between scans
@@ -449,7 +553,7 @@ def restore_recent_offers(s, src, prof_key, cvs_key) -> list:
     not analyse them again. An analysis made for another search profile, or a CV match made with other CVs, is dropped:
     those offers go through the filters and the AI again. -> the restored jobs."""
     cut = utcnow() - timedelta(hours=RECENT_HOURS)
-    have = {u for (u,) in s.query(Job.uid)}
+    have = {u for (u,) in s.query(Job.uid)} | marked_uids(s)  # applied to or removed by you: not brought back
     out = []
     for r in s.query(RecentOffer).filter(RecentOffer.source_url == normalize_url(src.url), RecentOffer.seen >= cut):
         if r.uid in have:
@@ -546,8 +650,9 @@ def scan_todo(s, info) -> tuple[list[int], int, int]:
             todo.append(x.id)
         else:
             done += 1
+    # an offer listed without the AI (turned off, or every quota out: analysis.NOT_CHECKED) does not wait for it
     pending = s.query(Job).filter(Job.source_id.in_(ids), Job.status.in_(["new", "candidate", "review"]),
-                                  Job.relevance_score.is_(None)).count()
+                                  Job.relevance_score.is_(None), ~func.coalesce(Job.reason, "").like("%not checked by AI")).count()
     return todo, done, pending
 
 

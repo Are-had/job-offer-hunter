@@ -29,6 +29,8 @@ CONFIG_DEFAULT = {
     # there). Anti-bot pages, logins and captchas are never bypassed either way.
     "respect_robots": False,
     "min_relevance": 60,
+    "ai_analysis_keywords": False,  # a search by keywords: the AI reads each offer (date, place, contract, relevance) or not
+    "ai_readers": True,  # the AI reads the websites the app cannot read alone (AI page reader, AI browser)
     "send_cv_remote_ok": False,
     "cv_consent_providers": [],  # with automatic switching: the hosted providers allowed to receive the CV
     "auto_models": True,  # start with the most capable model, move down the ladder when a limit is reached (llm.LADDER)
@@ -109,7 +111,12 @@ PROFILE_DEFAULT = {
         "autonomous driving", "vehicule autonome", "conduite autonome"],
     "exclude_titles": ["accountant", "comptable", "sales", "commercial", "recruiter", "recruteur", "marketing",
                        "juridique", "paie", "payroll", "customer success", "support client", "it support"],
-    "offer_types": ["job"],  # job | internship | apprenticeship | phd_postdoc
+    # cdi | cdd | phd | postdoc | internship | apprenticeship | other (classify.OFFER_TYPES); older profiles: job, phd_postdoc
+    "offer_types": ["cdi", "cdd", "other"],
+    "search_mode": "cv",  # cv: the research profile above, offers compared with the CVs | keywords: my_keywords alone
+    "my_keywords": [],  # the words of a search by keywords (Search page)
+    "search_for": "",  # '' = you; a friend's name: a search by their keywords with their own Gemini key (Settings)
+    "people": {},  # {friend: {"keywords": [...]}}: each friend's keywords
     "keywords_rev": 3,  # the defaults' keyword revision this profile has received (see upgrade_profile)
 }
 # keywords added to the defaults after profiles were saved, by revision. A saved profile receives each revision once: the
@@ -130,6 +137,17 @@ def upgrade_config(cfg: dict) -> tuple[dict, bool]:
     if int(cfg.get("settings_rev") or 1) >= SETTINGS_REV:
         return cfg, False
     return {**cfg, "respect_robots": CONFIG_DEFAULT["respect_robots"], "settings_rev": SETTINGS_REV}, True
+
+
+def run_profile(profile: dict) -> dict:
+    """The profile a scan works with. Search by CV: the profile as it is (its research interests and topics, every relevant
+    offer compared with the CVs). Search by keywords: the user's keywords alone choose and rank the offers (titles, the AI's
+    relevance, Hellowork and France Travail searches); no CV comparison. Applying it twice changes nothing."""
+    if profile.get("search_mode") != "keywords":
+        return profile
+    kws = [k.strip() for k in profile.get("my_keywords") or [] if k.strip()]
+    return {**profile, "keywords": kws, "keywords_only": True,
+            "description": "Looking for offers whose work matches one of these keywords: " + ", ".join(kws)}
 
 
 def upgrade_profile(profile: dict) -> tuple[dict, bool]:

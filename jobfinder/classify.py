@@ -657,15 +657,51 @@ _INTERN = [re.compile(p) for p in (
     r"\b(interns?|internships?|stagiaires?|stages?|trainees?|traineeship|praktikum|praktikant\w*|tirocinio)\b",
     r"\b(co ?op|working students?|werkstudent\w*|students?|etudiants?|etudiante|pfe|graduate program|fin d'etudes|"
     r"master thesis|master project|projet de master|m2 project|stage m2)\b")]
-OFFER_TYPES = {"job": "Jobs (CDI / CDD)", "internship": "Internships (stage)", "apprenticeship": "Apprenticeships (alternance)",
-               "phd_postdoc": "PhD / post-doc"}
+# the kinds of offer the user picks one by one (Search page)
+OFFER_TYPES = {"cdi": "CDI", "cdd": "CDD", "phd": "PhD (doctorat / thèse)", "postdoc": "Post-doc",
+               "internship": "Internships (stage)", "apprenticeship": "Apprenticeships (alternance)",
+               "other": "Other jobs (freelance, interim, VIE)"}
+# the broad kinds the title rules and the AI tell (saved by older versions in profiles too): each one covers several types
+KIND_GROUPS = {"job": ("cdi", "cdd", "other"), "phd_postdoc": ("phd", "postdoc")}
+KIND_LABEL = {**OFFER_TYPES, "job": "Jobs (CDI / CDD)", "phd_postdoc": "PhD / post-doc"}
 
 
 def wanted_types(profile) -> set:
-    """Kinds of offer the user looks for (older profiles: jobs, plus PhD / post-doc when that switch was on)."""
-    if profile.get("offer_types"):
-        return set(profile["offer_types"])
-    return {"job"} | ({"phd_postdoc"} if profile.get("include_phd_postdoc") else set())
+    """Types of offer the user looks for, among OFFER_TYPES. A profile saved by an older version keeps its meaning:
+    'job' is every job (CDI, CDD, other), 'phd_postdoc' is PhD and post-doc; older still, jobs plus PhD / post-doc when
+    that switch was on."""
+    kinds = profile.get("offer_types") or (["job"] + (["phd_postdoc"] if profile.get("include_phd_postdoc") else []))
+    return {t for k in kinds for t in KIND_GROUPS.get(k, (k,)) if t in OFFER_TYPES}
+
+
+_POSTDOC_RX = re.compile(r"post ?doc")
+_JOB_CONTRACT_RX = (("cdi", r"\bcdi\b|permanent|unbefristet|indetermin"),
+                    ("cdd", r"\bcdd\b|fixed term|temporary|befristet|duree determinee|determined duration"),
+                    ("other", r"freelance|independant|contractor|\binterim\b|\bv i e\b"))
+
+
+def contract_type(kind, *texts) -> str:
+    """The exact type of an offer (a key of OFFER_TYPES) from its broad kind (job | internship | apprenticeship |
+    phd_postdoc | unknown | '') and the words that state it (title, employment type, a quote of the text). '' when the
+    words do not tell it: a job that says neither CDI nor CDD."""
+    if kind in ("internship", "apprenticeship"):
+        return kind
+    t = _clean(" ".join(str(x) for x in texts if x))
+    if kind == "phd_postdoc":
+        return "postdoc" if _POSTDOC_RX.search(t) else "phd"
+    if kind == "job":
+        return next((name for name, rx in _JOB_CONTRACT_RX if re.search(rx, t)), "")
+    return ""
+
+
+def type_wanted(kind, ctype, want) -> bool:
+    """Is an offer of this broad kind and exact type (contract_type) one the user looks for? An offer whose type is not
+    stated is kept (the AI or the user tells later); a job that says neither CDI nor CDD is kept when any job is wanted."""
+    if ctype:
+        return ctype in want
+    if kind in ("", "unknown", None):
+        return True
+    return bool(set(KIND_GROUPS.get(kind, (kind,))) & want)
 _CONTRACTS = (("cdi", r"\bcdi\b|permanent|unbefristet"), ("cdd", r"\bcdd\b|fixed term|temporary|befristet"),
               ("freelance", r"freelance|independant|contractor"), ("interim", r"\binterim\b"),
               ("alternance", r"alternance|apprenti|work study"), ("internship", r"\bstage\b|intern|stagiaire"),
@@ -819,14 +855,20 @@ def analyze_title(title, dept="", profile=None, employment_type="") -> TitleInfo
 
     info.training, why = _training(t, employment_type)
     want = wanted_types(profile)
-    if info.training and info.training not in want:
-        return done("reject", f"{OFFER_TYPES[info.training].split(' (')[0].lower()} not wanted ({why})")
+    if info.training:
+        ctype = contract_type(info.training, t, _stated_type(employment_type))
+        if ctype not in want:
+            return done("reject", f"{KIND_LABEL[ctype].split(' (')[0].lower()} not wanted ({why})")
     if info.training and len(t.split()) == 1:
         return done("maybe", "the title only says the kind of offer ('Stagiaire'): the offer itself tells the subject")
-    if not info.training and "job" not in want and info.contract in ("cdi", "cdd", "freelance", "interim"):
-        return done("reject", f"{info.contract.upper()} job: you look for {', '.join(sorted(want))}")
+    jobs_wanted = want & set(KIND_GROUPS["job"])
+    if not info.training and info.contract in ("cdi", "cdd", "freelance", "interim", "vie"):
+        ctype = contract_type("job", t, _stated_type(employment_type)) or "other"
+        if ctype not in want:
+            return done("reject", f"{info.contract.upper()} job not wanted: you look for "
+                                  f"{', '.join(KIND_LABEL[k].split(' (')[0] for k in OFFER_TYPES if k in want)}")
     info = _topic_verdict(info, t, d, profile)
-    if info.verdict == "pass" and not info.training and "job" not in want:
+    if info.verdict == "pass" and not info.training and not jobs_wanted:
         info.verdict, info.reason = "maybe", info.reason + " - contract not stated in the title: checked by the AI"
     return info
 
@@ -837,6 +879,17 @@ def _topic_verdict(info, t, d, profile):
         return info
 
     hit = [k for k in expand_keywords(profile.get("keywords", [])) if _kw(k, t)]
+    if profile.get("keywords_only"):  # search by keywords: the user's words alone decide, whatever the field
+        for x in profile.get("exclude_titles", []):
+            # an excluded word that is part of one of the user's keywords ('marketing' in 'data marketing') does not exclude
+            if _kw(_clean(x), t) and not any(_kw(_clean(x), h) for h in hit):
+                return done("reject", f"excluded term '{x}'")
+        if hit:
+            return done("pass", f"title matches your keywords {hit[:3]}")
+        dh = [k for k in expand_keywords(profile.get("keywords", [])) if _kw(k, d)]
+        if dh:
+            return done("maybe", f"department matches your keywords {dh[:2]}")
+        return done("reject", "none of your keywords in the title")
     # a wanted ROLE named in full ('data scientist', 'ml engineer', 'ingenieur de recherche'), not a topic ('ai agents')
     specific = [h for h in hit if " " in h and re.search(r"scien|engineer|ingenieur|research|chercheur|develop", h)]
     for x in _NON_RESEARCH:

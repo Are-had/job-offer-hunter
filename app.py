@@ -22,12 +22,13 @@ from jobfinder import cv as cvm
 from jobfinder import llm
 from jobfinder import market
 from jobfinder.analysis import analyze_pipeline
-from jobfinder.classify import OFFER_TYPES
-from jobfinder.config import (APPLICANT_DEFAULT, CONFIG_DEFAULT, PRESET_DAYS, PROFILE_DEFAULT, run_config, upgrade_config,
-                             upgrade_profile)
+from jobfinder.classify import KIND_GROUPS, KIND_LABEL, OFFER_TYPES, contract_type, wanted_types
+from jobfinder.config import (APPLICANT_DEFAULT, CONFIG_DEFAULT, PRESET_DAYS, PROFILE_DEFAULT, run_config, run_profile,
+                             upgrade_config, upgrade_profile)
 from jobfinder.scan import PROBLEM_ORDER, Progress, run_scan, site_problem
-from jobfinder.store import (ENV_KEYS, CoverLetter, CVDocument, Job, SessionLocal, Source, ensure_gitignore, file_coverage,
-                             get_setting, init_db, keep_recent_offers, keyword_sources, load_keys, load_new_sources, save_key,
+from jobfinder.store import (ENV_KEYS, CoverLetter, CVDocument, Job, OfferMark, SessionLocal, Source, mark_offer, ensure_gitignore, file_coverage,
+                             get_setting, init_db, keep_recent_offers, keyword_sources, load_keys, load_new_sources, people, save_key,
+                             save_person_key, delete_key,
                              scan_ended, scan_running_elsewhere, set_setting, wipe_session_data, recent_count,
                              forget_recent_offers, restart_session, unfinished_scan)
 from jobfinder.web import extract_urls, offer_link, pasted_urls
@@ -79,7 +80,11 @@ with SessionLocal() as _s:
     if _upgraded:
         set_setting(_s, "config", CFG)
 c, p, ap = (json.loads(json.dumps(x)) for x in (CFG, PROFILE, APPLICANT))  # working copies, auto-saved at the end
-KEYS = load_keys()
+ALL_KEYS = load_keys()
+# your own keys: every search for you, letters, CV matching. Your friends' Gemini keys ('gemini@ziyad') are used only in
+# the searches made for them (scan_keys)
+KEYS = {k: v for k, v in ALL_KEYS.items() if "@" not in k}
+FRIENDS = people(ALL_KEYS)
 PRESETS = list(PRESET_DAYS) + ["All dates"]
 FONT = "PP Telegraf"  # the only typeface of the app (static/fonts), also in the charts
 STATUS = {"relevant": ("Relevant", "green"), "review": ("To check", "yellow"), "candidate": ("Not analysed", ""),
@@ -196,28 +201,80 @@ READ_OUTCOME = {"offers_found": "offers found", "nothing_in_range": "read: nothi
                 "no_openings": "read: the website says it has no offers now"}
 
 
+SEARCH_MODES = {"cv": "Search by my CV", "keywords": "Search by keywords"}
+
+
+def my_keywords(text) -> list[str]:
+    """The keywords typed on the Search page: one per line, or separated by commas or semicolons; each one once."""
+    return list(dict.fromkeys(k.strip() for k in re.split(r"[\n,;]", text or "") if k.strip()))
+
+
+def cv_uploader(running, label):
+    up = st.file_uploader(label, type=["pdf"], accept_multiple_files=True, key="cvup", disabled=running)
+    if up and _sig(up) != st.session_state.get("cv_sig"):
+        with SessionLocal() as s:
+            for f in up:
+                try:
+                    cvm.add_cv(s, f.name, f.getvalue())
+                except ValueError as e:
+                    st.error(f"{f.name}: {e}")
+        st.session_state["cv_sig"] = _sig(up)
+        st.rerun()
+    with SessionLocal() as s:
+        for cv in s.query(CVDocument).all():
+            a, b = st.columns([6, 1], vertical_alignment="center")
+            a.html(chips([(cv.name, "navy"), (cv.language, ""),
+                          ("needs OCR (scanned PDF)" if cv.status == "needs_ocr" else "", "red")]))
+            if b.button("Remove", key=f"rm{cv.id}", disabled=running):
+                cvm.delete_cv(s, cv.id)
+                st.rerun()
+
+
+def keywords_box(words, running, who="Your"):
+    """The keywords of a search: typed one per line or with commas -> the list, shown as chips."""
+    words = my_keywords(st.text_area(
+        f"{who} keywords — one per line, or separated by commas (English or French)", "\n".join(words or []),
+        height=120, placeholder="data scientist\ncomputer vision\ningénieur traitement du signal", disabled=running,
+        key=f"kw_{who}"))
+    if words:
+        st.html(chips([(k, "blue") for k in words]))
+        st.caption("A keyword also finds its translation (*computer vision* matches *vision par ordinateur*). "
+                   "Offers are not compared with a CV in this mode.")
+    else:
+        st.caption("Add at least one keyword to start a search.")
+    return words
+
+
 def step_cv(running, n):
     with st.container(border=True, key="card_cv"):
-        step(2, "Your CV", n["cvs"] > 0)
-        up = st.file_uploader("PDF CV(s) — compared with every relevant offer", type=["pdf"], accept_multiple_files=True,
-                              key="cvup", disabled=running)
-        if up and _sig(up) != st.session_state.get("cv_sig"):
-            with SessionLocal() as s:
-                for f in up:
-                    try:
-                        cvm.add_cv(s, f.name, f.getvalue())
-                    except ValueError as e:
-                        st.error(f"{f.name}: {e}")
-            st.session_state["cv_sig"] = _sig(up)
-            st.rerun()
-        with SessionLocal() as s:
-            for cv in s.query(CVDocument).all():
-                a, b = st.columns([6, 1], vertical_alignment="center")
-                a.html(chips([(cv.name, "navy"), (cv.language, ""),
-                              ("needs OCR (scanned PDF)" if cv.status == "needs_ocr" else "", "red")]))
-                if b.button("Remove", key=f"rm{cv.id}", disabled=running):
-                    cvm.delete_cv(s, cv.id)
-                    st.rerun()
+        friend = p.get("search_for") if p.get("search_for") in FRIENDS else ""
+        cur = "keywords" if friend else p.get("search_mode") if p.get("search_mode") in SEARCH_MODES else "cv"
+        mine = (p.get("people") or {}).get(friend, {}).get("keywords") if friend else p.get("my_keywords")
+        step(2, "What you look for", bool(mine) if cur == "keywords" else n["cvs"] > 0)
+        if FRIENDS:  # friends who gave their own Gemini key (Settings): a search for one of them uses their key
+            p["search_for"] = st.selectbox(
+                "Searching for", [""] + FRIENDS, index=([""] + FRIENDS).index(friend), disabled=running,
+                format_func=lambda x: "Me" if not x else f"{x.replace('_', ' ').title()} (their own Gemini key)",
+                help="A search for a friend: by their keywords, with their own Gemini key (Settings → AI model). "
+                     "Your own Gemini keys are not used for it. Each new search replaces the results.")
+            friend = p["search_for"]
+        if friend:
+            st.caption(f"Search by keywords for **{friend.replace('_', ' ').title()}** (your CVs are not used for a friend).")
+            people_ = p.setdefault("people", {})
+            people_.setdefault(friend, {})["keywords"] = keywords_box(people_[friend].get("keywords"), running,
+                                                                      f"{friend.replace('_', ' ').title()}'s")
+            return
+        p["search_mode"] = st.segmented_control(
+            "Search", list(SEARCH_MODES), default=cur, format_func=SEARCH_MODES.get, key="search_mode", disabled=running,
+            help="By my CV: offers are chosen with the research profile of Settings, then compared with your CV (CV match). "
+                 "By keywords: only offers whose title (then whose work, when the AI analysis is on) matches one of your "
+                 "keywords; no CV comparison.") or cur
+        if p["search_mode"] == "keywords":
+            p["my_keywords"] = keywords_box(p.get("my_keywords"), running)
+            with st.expander("Your CV (optional here: only for cover letters and applications)"):
+                cv_uploader(running, "PDF CV(s) — not used to rank the offers in a search by keywords")
+        else:
+            cv_uploader(running, "PDF CV(s) — compared with every relevant offer")
         hosted = sorted({x[0] for x in llm.model_chain(c, KEYS) if x[0] in llm.PAID}) if c["auto_models"] else []
         if hosted:  # the models switch automatically: the consent names every provider that could receive the CV
             ok = st.checkbox(f"Allow sending my CV text to these hosted providers: {', '.join(hosted)}",
@@ -365,6 +422,9 @@ def _monitor():
         st.rerun()  # the analysis just finished: refresh counts
     if not (d["running"] or d["finished"]):
         return
+    if d["running"]:  # a spinning indicator: the search is alive
+        st.status(f"Searching… {d['task']} — websites {d['sources_done']} / {d['sources_total']}, "
+                  f"{d['jobs']} offers in the date range so far", state="running", expanded=False)
     st.progress(min(d["sources_done"] / (d["sources_total"] or 1), 1.0),
                 text=f"{d['task'].capitalize()} — websites {d['sources_done']} / {d['sources_total']}")
     coverage_bars(d["running"])
@@ -386,16 +446,37 @@ def _monitor():
                    "If you want them too, select these types in 'I am looking for' and analyse again.")
     if not d["running"] and d["finished"]:
         st.page_link(RESULTS, label="See the results", icon=":material/arrow_forward:")
+    live_offers()
     with st.expander("Activity log"):
         st.code("\n".join(log[-60:]) or "—", language=None)
+
+
+def live_offers(limit=100):
+    """The newest offers found in the date range, with their links: filled in while the scan runs."""
+    with SessionLocal() as s:
+        q = s.query(Job).filter(Job.status.notin_(["out_of_range", "excluded"]))
+        total = q.count()
+        jobs = q.order_by(Job.discovered.desc()).limit(limit).all()
+        rows = [dict(title=j.title, company=j.employer, location=j.location_original or j.city or "",
+                     published=f"{j.pub_date:%Y-%m-%d}" if j.pub_date else "not stated",
+                     link=web_link(offer_link(j.url, j.title, j.apply_url))) for j in jobs]
+    if not rows:
+        return
+    st.markdown(f"**Offers found so far** — {total:,}" + (f" (the {limit} newest shown)" if total > limit else ""))
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=38 + 35 * min(len(rows), 10),
+                 column_config={"title": st.column_config.TextColumn(width="large"),
+                                "link": st.column_config.LinkColumn("link", help="Opens the offer on its website")})
 
 
 def step_analysis(running, n):
     with st.container(border=True, key="card_analysis"):
         step(3, "Analysis", bool(prog.snap()[0]["finished"]))
-        cur = p.get("offer_types") or ["job"]
+        # each type on its own; a profile saved with 'job' or 'phd_postdoc' shows the types they cover
+        cur = [k for k in OFFER_TYPES if k in wanted_types(p)] or list(KIND_GROUPS["job"])
         p["offer_types"] = st.pills("I am looking for", list(OFFER_TYPES), selection_mode="multi", default=cur,
-                                    format_func=OFFER_TYPES.get, key="types") or cur
+                                    format_func=OFFER_TYPES.get, key="types",
+                                    help="Pick each type you want. An offer that does not state its contract is kept: "
+                                         "its type shows as 'not stated'.") or cur
         pre = c["date_preset"] if c["date_preset"] in PRESETS else "Last 30 days"
         c["date_preset"] = st.segmented_control("Published within", PRESETS, default=pre, key="preset") or pre
         c["respect_robots"] = st.toggle(
@@ -411,11 +492,33 @@ def step_analysis(running, n):
             help="Reads Hellowork's open page of each keyword of the search profile (its 20 newest offers in France: Hellowork "
                  "does not let robots read its search or its next pages). The offers go through the same filters, the "
                  "date range first. Company pages on Hellowork are read when their address is in a website file.")
-        m = c["model"]
-        first = llm.model_chain(c, KEYS)[0]
-        st.caption((f"AI models: starts with **{first[0]} / {first[1]}** and switches when a limit is reached — see Settings. "
-                    if c["auto_models"] else f"AI model **{m['provider']} / {m['model']}** — change it in Settings. ")
-                   + ("" if n["cvs"] else "No CV yet: offers are ranked, but not compared with a CV."))
+        prof = scan_profile(p)  # what Start would search: yours by CV or keywords, or a friend's keywords
+        by_words = bool(prof.get("keywords_only"))
+        if by_words:
+            c["ai_analysis_keywords"] = st.toggle(
+                "Analyse each offer with AI", bool(c.get("ai_analysis_keywords")), disabled=running,
+                help="Off (default for a search by keywords): no AI call for the offers. Every offer whose title has one of "
+                     "your keywords, published in the date range and in France, is listed as it is ('not checked by AI'): "
+                     "an offer whose place or date the website does not give goes to 'To check', its contract may show "
+                     "'not stated', and there is no relevance score and nothing for the Statistics page. On: the AI reads "
+                     "each of these offers (date, place, contract, relevance): one AI call per offer.")
+        c["ai_readers"] = st.toggle(
+            "Use AI to read the websites the app cannot read alone", bool(c.get("ai_readers", True)), disabled=running,
+            help="On (default): a website whose offers the app cannot read by itself (no known job platform, offers "
+                 "written in the page) is read by the AI page reader or the AI browser — a few AI calls per such website. "
+                 "Off: those websites are read without AI and may give fewer offers.")
+        ai_used = not by_words or c["ai_analysis_keywords"] or c["ai_readers"]
+        m, keys = c["model"], scan_keys(prof.get("search_for") or "")
+        first = llm.model_chain(c, keys)[0]
+        whose = f" with {first[2].split('@', 1)[1]}'s key" if "@" in first[2] else ""
+        if not ai_used:
+            models = "No AI call in this search. "
+        elif c["auto_models"]:
+            models = f"AI models: starts with **{first[0]} / {first[1]}**{whose} and switches when a limit is reached — see Settings. "
+        else:
+            models = f"AI model **{m['provider']} / {m['model']}**{whose} — change it in Settings. "
+        st.caption(models + ("Search by keywords: offers are ranked by your keywords, not compared with a CV." if by_words else
+                      "" if n["cvs"] else "No CV yet: offers are ranked, but not compared with a CV."))
         with SessionLocal() as s:
             due = market.due(s)
         c["stats_with_scan"] = st.checkbox(
@@ -443,7 +546,8 @@ def step_analysis(running, n):
         if left:
             unfinished_box(left)
         x, y, _ = st.columns([1, 1, 3])
-        if not left and x.button("Start", type="primary", disabled=running or not n["sites"], icon=":material/play_arrow:",
+        no_words = by_words and not prof.get("keywords")  # a search by keywords needs one
+        if not left and x.button("Start", type="primary", disabled=running or not n["sites"] or no_words, icon=":material/play_arrow:",
                                  width="stretch"):
             start_scan()
         if y.button("Stop", disabled=not running, icon=":material/stop:", width="stretch"):
@@ -451,18 +555,40 @@ def step_analysis(running, n):
         st.fragment(run_every=2 if running else None)(_monitor)()
 
 
+def scan_profile(prof):
+    """The profile of a new scan: yours (by CV or by your keywords), or a friend's search by their own keywords."""
+    friend = prof.get("search_for") or ""
+    if friend not in FRIENDS:
+        return run_profile({**prof, "search_for": ""})
+    words = ((prof.get("people") or {}).get(friend) or {}).get("keywords") or []
+    return run_profile({**prof, "search_for": friend, "search_mode": "keywords", "my_keywords": words})
+
+
+def scan_keys(friend) -> dict:
+    """The keys of a scan. For you: your own keys. For a friend: their own Gemini key in place of yours (your Gemini keys
+    are not used, not even from the environment); your other providers' keys stay as backup when the models switch
+    automatically."""
+    if not friend or f"gemini@{friend}" not in ALL_KEYS:
+        return dict(KEYS)
+    return {**KEYS, **{x: "" for x in ("gemini", "gemini#2", "gemini#3", "gemini#4")}, f"gemini@{friend}": ALL_KEYS[f"gemini@{friend}"]}
+
+
 def start_scan(resume=None):
     """A new scan of every website with today's settings, or the resumed one: its websites still to read, with its own
     search settings and profile, and today's AI settings and keys (credits added in between are used)."""
     if resume:
-        ids, cfg, prof = resume["todo"], {**c, **resume.get("cfg", {})}, resume.get("profile") or p
+        ids, cfg, prof = resume["todo"], {**c, **resume.get("cfg", {})}, run_profile(resume.get("profile") or p)
     else:
         with SessionLocal() as s:
             keyword_sources(s, c)  # Hellowork searched with the profile's keywords (when ticked)
             ids = [r.id for r in s.query(Source).all()]
-        cfg, prof = c, p
-    cfg, prof, keys = json.loads(json.dumps(cfg)), json.loads(json.dumps(prof)), dict(KEYS)
-    cfg["_keys"] = keys  # in memory only (never saved): lets the AI read pages and offers
+        cfg, prof = c, scan_profile(p)  # search by CV, or by the keywords of step 2 (yours or a friend's)
+    keys = scan_keys(prof.get("search_for") or "")
+    cfg, prof = json.loads(json.dumps(cfg)), json.loads(json.dumps(prof))
+    # a search by keywords reads the offers without the AI unless it is turned on (Search page, step 3)
+    cfg["ai_analysis"] = not prof.get("keywords_only") or bool(c.get("ai_analysis_keywords"))
+    # in memory only (never saved): lets the AI read the websites the app cannot read alone, when that is allowed
+    cfg["_keys"] = keys if c.get("ai_readers", True) else None
     threading.Thread(target=run_scan, args=(ids, cfg, prof, prog, lambda pr, feed: analyze_pipeline(cfg, prof, keys, pr, feed)),
                      kwargs={"resume": resume}, daemon=True).start()
     st.rerun()
@@ -505,8 +631,6 @@ def page_search():
 
 
 # =================================================================== page 2: results
-CONTRACT_LABEL = {"cdi": "CDI", "cdd": "CDD", "vie": "VIE", "phd": "PhD", "postdoc": "Post-doc", "interim": "Interim",
-                  "freelance": "Freelance", "alternance": "Apprenticeship", "internship": "Internship"}
 
 
 def online_for(since):
@@ -518,22 +642,42 @@ def online_for(since):
     return f"{since} ({'today' if n <= 0 else '1 day' if n == 1 else f'{n} days'})"
 
 
+TYPE_LABEL = {"cdi": "CDI", "cdd": "CDD", "phd": "PhD", "postdoc": "Post-doc", "internship": "Internship",
+              "apprenticeship": "Apprenticeship", "other": "Other job", "job": "Job (CDI / CDD not stated)",
+              "phd_postdoc": "PhD / post-doc"}
+
+
+def offer_type(j) -> str:
+    """The offer's exact type (cdi, cdd, phd, postdoc, internship, apprenticeship, other), else its broad kind (job,
+    phd_postdoc), else '' (not stated): the AI's reading first, then the title's. Offers analysed by an older version have
+    no exact type saved: it is read again from their title and employment type."""
+    ti, r = (j.extra or {}).get("title_info") or {}, j.relevance_json or {}
+    if r.get("contract_type"):
+        return r["contract_type"]
+    kind = r.get("contract_kind") if r.get("contract_kind") not in (None, "unknown") else (
+        ti.get("training") or ("job" if ti.get("contract") in ("cdi", "cdd", "freelance", "interim", "vie") else ""))
+    return contract_type(kind, j.title, j.employment_type) or kind or ""
+
+
 def _rows():
     with SessionLocal() as s:
-        out = []
-        for j in s.query(Job).filter(Job.status != "out_of_range").all():
+        out, mine = [], {m.uid: m for m in s.query(OfferMark)}  # your marks: applied, comment (kept between searches)
+        for j in s.query(Job).filter(Job.status.notin_(["out_of_range", "dismissed"])).all():
             ti = (j.extra or {}).get("title_info") or {}
             r = j.relevance_json or {}
-            kind = r.get("contract_kind") if r.get("contract_kind") not in (None, "unknown") else (ti.get("training") or ti.get("contract") or "")
-            out.append(dict(uid=j.uid, title=j.title, company=j.employer, location=j.location_original or "",
+            m = mine.get(j.uid)
+            out.append(dict(uid=j.uid, applied=bool(m and m.state == "applied"), title=j.title, company=j.employer,
+                            location=j.location_original or "",
                             # ISO text: sorts by date ('not stated' is written in after sorting)
                             published=f"{j.pub_date:%Y-%m-%d}" if j.pub_date else "",
                             online_since=online_for((j.extra or {}).get("first_seen")),
-                            type=CONTRACT_LABEL.get(kind) or OFFER_TYPES.get(kind, kind).split(" (")[0] if kind else "not stated",
+                            type=TYPE_LABEL.get(offer_type(j), "not stated"),
                             topics=", ".join(r.get("research_topics") or ti.get("topics", [])),
                             relevance=j.relevance_score, match=j.match_score, link=web_link(offer_link(j.url, j.title, j.apply_url)),
                             # the app's own page for the offer, which opens and fills its application at once
-                            fill=f"/results?fill={j.uid}", status=j.status))
+                            fill=f"/results?fill={j.uid}",
+                            url=web_link(offer_link(j.url, j.title, j.apply_url)),  # the offer's full address, shown in the list
+                            comment=m.note if m else "", status=j.status))
     return pd.DataFrame(out)
 
 
@@ -545,20 +689,41 @@ def page_results():
     if df.empty:
         st.html('<div class="jf-empty"><div class="jf-big">No offers yet</div>Follow the three steps on the Search page.</div>')
         return
-    views = {"Relevant": ["relevant"], "To check": ["review"], "Not analysed": ["candidate"], "Excluded": ["excluded"], "All": None}
-    label = lambda k: f"{k} ({len(df) if views[k] is None else int(df.status.isin(views[k]).sum())})"
+    if prog.snap()[0]["running"]:
+        r1, r2 = st.columns([5, 1], vertical_alignment="center")
+        r1.status("Search in progress — new offers keep arriving", state="running", expanded=False)
+        r2.button("Refresh", icon=":material/refresh:", width="stretch", key="refresh_results")
+    views = {"Relevant": lambda d: d.status == "relevant", "To check": lambda d: d.status == "review",
+             "Not analysed": lambda d: d.status.isin(["candidate", "new"]), "Excluded": lambda d: d.status == "excluded",
+             "Applied": lambda d: d.applied, "All": None}
+    size = lambda k: len(df) if views[k] is None else int(views[k](df).sum())
+    label = lambda k: f"{k} ({size(k)})"
+    first = next((k for k in ("Relevant", "To check", "Not analysed") if size(k)), "All")  # opens on a view that has offers
     a, b = st.columns([3, 2])
-    view = a.segmented_control("Show", list(views), default="Relevant", format_func=label, key="view") or "Relevant"
+    view = a.segmented_control("Show", list(views), default=first, format_func=label, key="view") or first
     q = b.text_input("Filter", placeholder="title, company, topic…")
-    v = df if views[view] is None else df[df.status.isin(views[view])]
+    v = df if views[view] is None else df[views[view](df)]
+    order = list(TYPE_LABEL.values()) + ["not stated"]
+    present = sorted(set(df.type), key=lambda x: order.index(x) if x in order else len(order))
+    kinds = st.pills("Contract", present, selection_mode="multi", key="contract_filter",
+                     format_func=lambda x: f"{x} ({int((v.type == x).sum())})",
+                     help="Show only these types (CDI, CDD, PhD, post-doc…). None selected: every type.")
+    if kinds:
+        v = v[v.type.isin(kinds)]
     if q:
-        v = v[(v.title + " " + v.company.fillna("") + " " + v.topics + " " + v.type).str.lower().str.contains(q.lower(), regex=False)]
+        v = v[(v.title + " " + v.company.fillna("") + " " + v.topics + " " + v.type + " " + v.comment).str.lower()
+              .str.contains(q.lower(), regex=False)]
     v = v.sort_values(["match", "relevance", "published"], ascending=False, na_position="last")
     v = v.assign(published=v.published.where(v.published != "", "not stated"))
     # up to 20 rows on screen at once; the table scrolls beyond
     sel = st.dataframe(v.drop(columns=["uid", "status"]), width="stretch", hide_index=True, height=38 + 35 * min(max(len(v), 1), 20),
-                       on_select="rerun", selection_mode="single-row", key="grid",
+                       # a new key after an offer is removed: the selection does not jump to the next offer
+                       on_select="rerun", selection_mode="single-row", key=f"grid{st.session_state.get('grid_n', 0)}",
                        column_config={"title": st.column_config.TextColumn(width="large"),  # the others fit their text
+                                      "applied": st.column_config.CheckboxColumn(
+                                          "applied", help="You applied (select the row, then 'I applied'): kept between "
+                                                          "searches, and the offer is not added again by the next ones"),
+                                      "comment": st.column_config.TextColumn("my comment", width="medium"),
                                       "published": st.column_config.TextColumn(
                                           help="'not stated': the website gives no publication date (see 'online since')"),
                                       "online_since": st.column_config.TextColumn(
@@ -569,22 +734,110 @@ def page_results():
                                       "match": st.column_config.ProgressColumn("CV match", min_value=0, max_value=100, format="%d"),
                                       "link": st.column_config.LinkColumn(
                                           "description", display_text="read", help="The offer on its website: read it"),
+                                      "url": st.column_config.LinkColumn(
+                                          "offer link", width="large", help="The offer's address on its website: click to open it"),
                                       "fill": st.column_config.LinkColumn(
                                           "apply", display_text="fill", help="Opens the application in the app's window, "
                                           "signed in (or your account made), everything filled and your CV attached: you check "
                                           "and submit")})
-    st.download_button("Export CSV", v.drop(columns=["uid", "fill"]).to_csv(index=False), "offers.csv", icon=":material/download:")
+    st.download_button("Export CSV", v.drop(columns=["uid", "fill", "url"]).to_csv(index=False), "offers.csv", icon=":material/download:")
     rows = sel.selection.rows if sel and sel.selection else []
     if rows:
         if fill:
             del st.query_params["fill"]  # a row chosen in the table replaces the offer of the link
+        offer_actions(v.iloc[rows[0]].uid)
         job_detail(v.iloc[rows[0]].uid)
     elif fill and fill in set(df.uid):
         with top:
             job_detail(fill, autostart=True)
             st.divider()
     else:
-        st.caption("Select a row to open the offer, or use its 'fill' link.")
+        st.caption("Select a row to open the offer, mark it as applied, remove it or comment it — or use its 'fill' link.")
+    my_marks()
+
+
+def offer_actions(uid):
+    """For the offer chosen in the list: I applied / Remove it (not for me) / my comment. Remembered between searches: an
+    offer you applied to or removed is not added again by the next searches."""
+    with SessionLocal() as s:
+        j = s.query(Job).filter_by(uid=uid).first()
+        if j is None:
+            return
+        m = s.get(OfferMark, uid)
+        state, note = (m.state, m.note or "") if m else ("", "")
+        with st.container(border=True, key="card_mine"):
+            a, b, x = st.columns([1.3, 1.7, 4], vertical_alignment="bottom")
+            if state == "applied":
+                if a.button("Applied", icon=":material/check_circle:", key=f"ap_{uid}", width="stretch",
+                            help="Click to undo: the offer is no longer marked as applied"):
+                    mark_offer(s, j, "")
+                    st.rerun()
+            elif a.button("I applied", type="primary", icon=":material/send:", key=f"ap_{uid}", width="stretch"):
+                mark_offer(s, j, "applied", st.session_state.get(f"note_{uid}"))
+                st.rerun()
+            if b.button("Remove: not for me", icon=":material/delete:", key=f"rm_{uid}", width="stretch",
+                        help="Takes the offer out of the results; the next searches do not add it again. "
+                             "Put it back from 'Your applications and removed offers' below."):
+                mark_offer(s, j, "dismissed", st.session_state.get(f"note_{uid}"))
+                st.session_state["grid_n"] = st.session_state.get("grid_n", 0) + 1
+                st.toast(f"Removed: {j.title[:60]}")
+                st.rerun()
+            new = x.text_input("My comment", note, key=f"note_{uid}",
+                               placeholder="sent on 27/11 · call back in 2 weeks · asks for 3 years of experience…")
+            if new.strip() != note:  # saved when you press Enter or leave the field
+                mark_offer(s, j, None, new)
+                st.toast("Comment saved")
+
+
+MARK_LABEL = {"applied": "applied", "dismissed": "removed (not for me)", "": "comment only"}
+
+
+def my_marks():
+    """Every offer you applied to, removed or commented, kept between searches (the session's offers are deleted at each
+    launch, these marks are not): change one, or forget it so that the searches can show the offer again."""
+    with SessionLocal() as s:
+        marks = s.query(OfferMark).order_by(OfferMark.updated.desc()).all()
+        if not marks:
+            return
+        n = Counter(m.state for m in marks)
+        with st.expander(f"Your applications and removed offers — {n['applied']} applied, {n['dismissed']} removed"):
+            st.caption("Kept between searches. Applied or removed, an offer is not added again by the next searches. "
+                       "Change the status or the comment here; delete a row to forget it (the searches can show the "
+                       "offer again).")
+            df = pd.DataFrame([dict(uid=m.uid, status=m.state or "", title=m.title, company=m.employer, comment=m.note or "",
+                                    date=f"{m.updated:%Y-%m-%d}", link=web_link(m.url)) for m in marks])
+            ed = st.data_editor(df, hide_index=True, width="stretch", num_rows="dynamic",
+                                key=f"marks_editor{st.session_state.get('marks_n', 0)}",  # new after each change
+                                disabled=["title", "company", "date", "link"], column_order=[k for k in df.columns if k != "uid"],
+                                column_config={"status": st.column_config.SelectboxColumn(
+                                                   "status", options=list(MARK_LABEL), format_func=MARK_LABEL.get, required=True),
+                                               "comment": st.column_config.TextColumn("my comment", width="large"),
+                                               "link": st.column_config.LinkColumn("link", display_text="open")})
+            st.download_button("Export my applications (CSV)", df.drop(columns=["uid"]).to_csv(index=False),
+                               "my_applications.csv", icon=":material/download:")
+            changed = False
+            kept = set(ed.uid.dropna())
+            for m in marks:
+                if m.uid not in kept:  # row deleted: forgotten, the searches can show the offer again
+                    job = s.query(Job).filter_by(uid=m.uid).first()
+                    if job is not None and job.status == "dismissed":
+                        job.status, job.reason = "new", ""
+                    s.delete(m)
+                    changed = True
+            for r in ed.itertuples():
+                m = s.get(OfferMark, r.uid) if isinstance(r.uid, str) else None
+                if m is None or (m.state, m.note or "") == (r.status or "", r.comment or ""):
+                    continue
+                job = s.query(Job).filter_by(uid=m.uid).first()
+                if job is not None:
+                    mark_offer(s, job, r.status or "", r.comment or "")
+                else:  # the offer is not in this session's results any more: only the record changes
+                    m.state, m.note, m.updated = r.status or "", (r.comment or "").strip(), datetime.utcnow()
+                changed = True
+            if changed:  # a fresh editor: its edits are not applied again to the rows as they are now
+                s.commit()
+                st.session_state["marks_n"] = st.session_state.get("marks_n", 0) + 1
+                st.rerun()
 
 
 def job_detail(uid, autostart=False):
@@ -594,8 +847,8 @@ def job_detail(uid, autostart=False):
         label, cls = STATUS.get(j.status, (j.status, ""))
         with st.container(border=True, key="card_offer"):
             st.subheader(j.title, anchor=False)
-            kind = r.get("contract_kind") if r.get("contract_kind") not in (None, "unknown") else ti.get("training")
-            st.html(chips([(j.employer, "navy"), (label, cls), (OFFER_TYPES.get(kind or "", ""), "blue"),
+            kind = offer_type(j)
+            st.html(chips([(j.employer, "navy"), (label, cls), (KIND_LABEL.get(kind, ""), "blue"),
                            ("" if kind else "contract not stated", ""), ("" if j.pub_date else "no publication date", "yellow"),
                            ("research subject" if ti.get("kind") == "research_topic" else "", "blue"),
                            ({"fr": "français", "en": "English"}.get(ti.get("lang"), ""), "")]
@@ -872,6 +1125,34 @@ def settings_ai():
                                                               format_func=lambda m: f"{m}  (tested)" if m in ok else m)}
         st.caption("Tested: checked on this app's tasks (offer analysis, publication date, lab pages, browser).")
     st.caption(f"In use: **{c['model']['provider']} / {c['model']['model']}**")
+    friends_keys()
+
+
+def friends_keys():
+    """Friends who also look for a job give their own Gemini key: a search made for one of them (Search page, 'Searching
+    for') uses their key and their keywords, never for anyone else's search."""
+    st.divider()
+    st.markdown("**Friends' Gemini keys**")
+    st.caption("A friend who also looks for a job can give you their own Gemini key. A search made for them (Search page → "
+               "'Searching for') uses their key and their keywords; it is never used for your searches or another friend's. "
+               "Kept only on this computer, in api_keys.txt.")
+    for f in FRIENDS:
+        a, b = st.columns([5, 1], vertical_alignment="center")
+        a.html(chips([(f.replace("_", " ").title(), "navy"), (llm.mask(ALL_KEYS[f"gemini@{f}"]), "")]))
+        if b.button("Remove", key=f"rmkey_{f}"):
+            delete_key(f"gemini@{f}")  # a search still set for this friend becomes yours again (scan_profile)
+            st.toast(f"{f}'s key removed")
+            st.rerun()
+    a, b, x = st.columns([2, 3, 1], vertical_alignment="bottom")
+    name = a.text_input("Friend's name", key="friend_name", placeholder="Ziyad")
+    key = b.text_input("Their Gemini API key", type="password", key="friend_key", placeholder="AIza…")
+    if x.button("Add", disabled=not (name and key), width="stretch", key="friend_add"):
+        try:
+            n = save_person_key(name, key)
+            st.toast(f"Key saved for {n}")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
 
 
 def settings_profile():
@@ -1058,13 +1339,14 @@ def page_quota():
                "Cohere's trial limit is monthly; NVIDIA limits requests per minute. Models are used in this order, best first.")
     rec, now, gone, keys = llm.quota_record(), time.time(), llm._gone(), load_keys()
     today = time.strftime("%Y-%m-%d")
-    for slot in QUOTA_SLOTS:
-        prov = slot.split("#")[0]
+    for slot in QUOTA_SLOTS + tuple(f"gemini@{f}" for f in people(keys)):  # each friend's key: its own quota
+        prov = re.split(r"[#@]", slot)[0]
         key = keys.get(slot) or (os.environ.get(ENV_KEYS.get(slot, ""), "") if slot in ENV_KEYS else "")
         if not key:
             continue
-        with st.container(border=True, key=f"card_quota_{slot.replace('#', '_')}"):
-            nth = {"#2": " — second key", "#3": " — third key", "#4": " — fourth key"}.get(slot[len(prov):], "")
+        with st.container(border=True, key=f"card_quota_{re.sub(r'[#@]', '_', slot)}"):
+            nth = {"#2": " — second key", "#3": " — third key", "#4": " — fourth key"}.get(slot[len(prov):], "") or (
+                f" — {slot.split('@', 1)[1].replace('_', ' ').title()}'s key" if "@" in slot else "")
             st.markdown(f"**{PROVIDER_NAME[prov]}**{nth} · `{llm.mask(key)}`")
             entries = {k.split("|", 1)[1]: v for k, v in rec.items() if k.startswith(slot + "|")}
             if prov == "cohere":
